@@ -1,0 +1,12 @@
+# Blacklist everything by default
+*
+*/
+
+# Whitelist only the four main project files
+!Get-OpenDrsRecommendation.ps1
+!Invoke-OpenDrsMigration.ps1
+!OpenDRS.psd1
+!README.md
+
+# Make sure to include this gitignore file itself
+!.gitignore
