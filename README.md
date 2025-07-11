@@ -162,3 +162,11 @@ The scripts use statistical analysis (standard deviation) to identify cluster im
 - Comprehensive rule validation before any migration
 - High vMotion priority for reliable migrations
 - Detailed logging of all operations and failures
+
+### 7.4. Tested Versions
+- **PowerShell 7.5.2** (Primary testing platform)
+- **PowerShell 5.1.26100.4652** (Windows PowerShell compatibility)  
+- **VMware PowerCLI 13.3.0** (build 24145083)
+- **VMware vCenter Server 8.0.3.00500**
+- **VMware ESXi 8.0.3** (build 24674464)
+- **VMware ESXi 7.0.3** (build 24723872)
