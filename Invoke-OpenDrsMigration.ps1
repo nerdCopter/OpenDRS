@@ -185,7 +185,17 @@ if ($allRecommendations.Count -eq 0) {
     if ($PSBoundParameters.ContainsKey('MigrationThreshold')) {
         $engineArgs['MigrationThreshold'] = $MigrationThreshold
     }
-    $allRecommendations = & "$PSScriptRoot\Get-OpenDrsRecommendation.ps1" @engineArgs
+    
+    # Capture the recommendations from the engine script
+    $allRecommendations = @(& "$PSScriptRoot\Get-OpenDrsRecommendation.ps1" @engineArgs)
+    
+    # Debug: Show what we received from the engine
+    Write-Host "`nReceived $($allRecommendations.Count) recommendations from engine."
+    if ($allRecommendations.Count -gt 0) {
+        foreach ($rec in $allRecommendations) {
+            Write-Host "VM '$($rec.VM_to_Move)' -> Host '$($rec.Recommended_Destination_Host)'"
+        }
+    }
 }
 
 # Connect for migration operations if we have recommendations to execute
@@ -195,60 +205,45 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
         exit 1
     }
 
-    # Connect to vCenter for migration operations
-    if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
-        # Check if we're connected to the same server (handle FQDN vs hostname differences)
-        $connectedServer = $global:DefaultVIServer.Name
-        $targetServer = $vCenterServer
-        
-        # Compare servers - handle cases where one might be FQDN and other hostname
-        $serversMatch = ($connectedServer -eq $targetServer) -or 
-                       ($connectedServer.Split('.')[0] -eq $targetServer.Split('.')[0])
-        
-        if ($serversMatch) {
-            Write-Verbose "Using existing vCenter Server connection: $connectedServer"
-            # We're using an existing connection, so don't disconnect unless we started disconnected
-            $shouldDisconnect = -not $wasConnectedAtStart
-        }
-        else {
-            Write-Host "Connecting to vCenter Server: $vCenterServer..."
-            Write-Host "Disconnecting existing vCenter session from $connectedServer."
-            Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force -WhatIf:$false
-            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
-            Write-Host "Successfully connected to $vCenterServer."
-            $shouldDisconnect = $true
-        }
+    # The engine script will have disconnected, so we need to reconnect for migrations
+    try {
+        Write-Host "`nReconnecting to vCenter Server for migrations: $vCenterServer..."
+        Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+        Write-Host "Successfully connected to $vCenterServer."
+        $shouldDisconnect = $true
     }
-    else {
-        try {
-            Write-Host "Connecting to vCenter Server: $vCenterServer..."
-            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
-            Write-Host "Successfully connected to $vCenterServer."
-            $shouldDisconnect = $true
-        }
-        catch {
-            Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
-            exit 1
-        }
+    catch {
+        Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
+        exit 1
     }
 }
 
 # Execute migrations with confirmation
 if ($allRecommendations -and $allRecommendations.Count -gt 0) {
-    Write-Host "`nStarting migration process..."
+    Write-Host "`nFound $($allRecommendations.Count) migration recommendation(s) to execute."
+    Write-Host "Starting migration process..."
+    
+    $successCount = 0
+    $failureCount = 0
+    
     foreach ($rec in $allRecommendations) {
         try {
-            if ($PSCmdlet.ShouldProcess("Target: '$($rec.VM_to_Move)' -> '$($rec.Recommended_Destination_Host)'", "Migrate VM")) {
-                Write-Verbose "Executing migration for VM '$($rec.VM_to_Move)'..."
-                $vmToMove = Get-VM -Name $rec.VM_to_Move
-                $destinationHost = Get-VMHost -Name $rec.Recommended_Destination_Host
+            if ($PSCmdlet.ShouldProcess("VM '$($rec.VM_to_Move)' from '$($rec.Source_Host)' to '$($rec.Recommended_Destination_Host)'", "Migrate VM")) {
+                Write-Host "Migrating VM '$($rec.VM_to_Move)' to '$($rec.Recommended_Destination_Host)'..."
+                $vmToMove = Get-VM -Name $rec.VM_to_Move -ErrorAction Stop
+                $destinationHost = Get-VMHost -Name $rec.Recommended_Destination_Host -ErrorAction Stop
                 Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
+                Write-Host "✓ Successfully migrated VM '$($rec.VM_to_Move)'" -ForegroundColor Green
+                $successCount++
             }
         }
         catch {
             Write-Error "Failed to migrate VM '$($rec.VM_to_Move)'. Error: $($_.Exception.Message)"
+            $failureCount++
         }
     }
+    
+    Write-Host "`nMigration Summary: $successCount successful, $failureCount failed."
 }
 else {
     Write-Host "`nNo migration recommendations to process."
