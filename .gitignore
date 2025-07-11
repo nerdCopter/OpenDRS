@@ -2,10 +2,10 @@
 *
 */
 
-# Whitelist only the four main project files
+# Whitelist only the main project files
 !Get-OpenDrsRecommendation.ps1
 !Invoke-OpenDrsMigration.ps1
-!OpenDRS.psd1
+!Pipeline-Example.ps1
 !README.md
 
 # Make sure to include this gitignore file itself

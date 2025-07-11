@@ -3,7 +3,7 @@
     Gets, displays, and executes VM migration recommendations for cluster balancing.
 
 .DESCRIPTION
-    This is the main user-facing script. It calls the 'Get-DrsRecommendation.ps1' engine to
+    This is the main user-facing script. It calls the 'Get-OpenDrsRecommendation.ps1' engine to
     generate a list of migrations. It then displays these recommendations and, after user
     confirmation, executes the migrations.
 
@@ -26,19 +26,19 @@
     Sets the migration aggressiveness level (1-5) for the engine. Default is 3.
 
 .EXAMPLE
-    .\Invoke-DrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com'
+    .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com'
 
     Gets and displays migration recommendations. Prompts for a final confirmation before
     executing the migrations.
 
 .EXAMPLE
-    .\Invoke-DrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com' -WhatIf
+    .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com' -WhatIf
 
     Gets and displays the migration recommendations that *would* be performed, but does not
     execute them.
 
 .EXAMPLE
-    .\Invoke-DrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com' -ExportToCsv
+    .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com' -ExportToCsv
 
     Gets migration recommendations and exports them to a CSV file.
 
@@ -59,8 +59,16 @@ param(
     [switch]$help
 )
 
+# Handle pipeline input by collecting all input objects
+$pipelineInput = @()
+
+# Read from pipeline if data is available
+if ($input) {
+    $pipelineInput = @($input | ForEach-Object { $_ })
+}
+
 function Show-Usage {
-    Write-Host "Usage: .\Invoke-DrsMigration.ps1 -vCenterServer <server_name> [options]"
+    Write-Host "Usage: .\Invoke-OpenDrsMigration.ps1 -vCenterServer <server_name> [options]"
     Write-Host ""
     Write-Host "Gets, displays, and executes VM migration recommendations for cluster balancing."
     Write-Host ""
@@ -75,12 +83,21 @@ function Show-Usage {
     Write-Host "  -help, -h, -version, -v     Show this help message."
 }
 
-if ($help -or ([string]::IsNullOrEmpty($vCenterServer))) {
+if ($help -or [string]::IsNullOrEmpty($vCenterServer)) {
     Show-Usage
     return
 }
 
 # --- Script Body ---
+
+# Track whether this script made the connection (and should disconnect later)
+$shouldDisconnect = $false
+$allRecommendations = @()
+
+# Handle pipeline input if provided
+if ($pipelineInput.Count -gt 0) {
+    $allRecommendations = @($pipelineInput)
+}
 
 # Ensure PowerCLI module is available
 if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) {
@@ -94,43 +111,91 @@ if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) {
     }
 }
 
-# Get the recommendations from the engine script
-Write-Verbose "Getting DRS recommendations from vCenter: $vCenterServer..."
-$engineArgs = @{
-    vCenterServer = $vCenterServer
-    NoDisconnect  = $true
-}
-if ($PSBoundParameters['Verbose']) {
-    $engineArgs['Verbose'] = $true
-}
-if ($PSBoundParameters['ExportToCsv']) {
-    $engineArgs['ExportToCsv'] = $true
-}
-if ($PSBoundParameters['BypassHostRulesAndGroups']) {
-    $engineArgs['BypassHostRulesAndGroups'] = $true
-}
-if ($PSBoundParameters.ContainsKey('MigrationThreshold')) {
-    $engineArgs['MigrationThreshold'] = $MigrationThreshold
-}
-$recommendations = & "$PSScriptRoot\Get-DrsRecommendation.ps1" @engineArgs
-
-# Execute migrations with confirmation
-Write-Host "`nStarting migration process..."
-foreach ($rec in $recommendations) {
-    try {
-        if ($PSCmdlet.ShouldProcess("Target: '$($rec.VM_to_Move)' -> '$($rec.Recommended_Destination_Host)'", "Migrate VM")) {
-            Write-Verbose "Executing migration for VM '$($rec.VM_to_Move)'..."
-            $vmToMove = Get-VM -Name $rec.VM_to_Move
-            $destinationHost = Get-VMHost -Name $rec.Recommended_Destination_Host
-            Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
+# Check connection status and connect if needed (only if vCenterServer provided)
+if ($vCenterServer) {
+    if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
+        # Check if we're connected to the same server (handle FQDN vs hostname differences)
+        $connectedServer = $global:DefaultVIServer.Name
+        $targetServer = $vCenterServer
+        
+        # Compare servers - handle cases where one might be FQDN and other hostname
+        $serversMatch = ($connectedServer -eq $targetServer) -or 
+                       ($connectedServer.Split('.')[0] -eq $targetServer.Split('.')[0])
+        
+        if ($serversMatch) {
+            Write-Host "Already connected to vCenter Server: $connectedServer"
+        }
+        else {
+            Write-Host "Connecting to vCenter Server: $vCenterServer..."
+            Write-Host "Disconnecting existing vCenter session from $connectedServer."
+            Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force
+            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+            Write-Host "Successfully connected to $vCenterServer."
+            $shouldDisconnect = $true
         }
     }
-    catch {
-        Write-Error "Failed to migrate VM '$($rec.VM_to_Move)'. Error: $($_.Exception.Message)"
+    else {
+        try {
+            Write-Host "Connecting to vCenter Server: $vCenterServer..."
+            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+            Write-Host "Successfully connected to $vCenterServer."
+            $shouldDisconnect = $true
+        }
+        catch {
+            Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
+            exit 1
+        }
     }
 }
 
-# The Get-DrsRecommendation script is now told not to disconnect.
-# We are responsible for disconnecting at the end.
-Write-Verbose "`nAll tasks complete. Disconnecting from $vCenterServer."
-if ($global:DefaultVIServer) { Disconnect-VIServer -Confirm:$false -Force }
+# If no recommendations found, get them from the engine script
+if ($allRecommendations.Count -eq 0) {
+    Write-Verbose "Getting DRS recommendations from vCenter: $vCenterServer..."
+    $engineArgs = @{
+        vCenterServer = $vCenterServer
+        NoDisconnect  = $true
+    }
+    if ($PSBoundParameters['Verbose']) {
+        $engineArgs['Verbose'] = $true
+    }
+    if ($PSBoundParameters['ExportToCsv']) {
+        $engineArgs['ExportToCsv'] = $true
+    }
+    if ($PSBoundParameters['BypassHostRulesAndGroups']) {
+        $engineArgs['BypassHostRulesAndGroups'] = $true
+    }
+    if ($PSBoundParameters.ContainsKey('MigrationThreshold')) {
+        $engineArgs['MigrationThreshold'] = $MigrationThreshold
+    }
+    $allRecommendations = & "$PSScriptRoot\Get-OpenDrsRecommendation.ps1" @engineArgs
+}
+
+# Execute migrations with confirmation
+if ($allRecommendations -and $allRecommendations.Count -gt 0) {
+    Write-Host "`nStarting migration process..."
+    foreach ($rec in $allRecommendations) {
+        try {
+            if ($PSCmdlet.ShouldProcess("Target: '$($rec.VM_to_Move)' -> '$($rec.Recommended_Destination_Host)'", "Migrate VM")) {
+                Write-Verbose "Executing migration for VM '$($rec.VM_to_Move)'..."
+                $vmToMove = Get-VM -Name $rec.VM_to_Move
+                $destinationHost = Get-VMHost -Name $rec.Recommended_Destination_Host
+                Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
+            }
+        }
+        catch {
+            Write-Error "Failed to migrate VM '$($rec.VM_to_Move)'. Error: $($_.Exception.Message)"
+        }
+    }
+}
+else {
+    Write-Host "`nNo migration recommendations to process."
+}
+
+# Disconnect only if this script made the connection
+if ($shouldDisconnect) {
+    Write-Host "`nAll tasks complete. Disconnecting from $vCenterServer (connection made by this script)."
+    Disconnect-VIServer -Confirm:$false -Force
+}
+else {
+    Write-Host "`nAll tasks complete. Leaving existing vCenter connection open."
+}

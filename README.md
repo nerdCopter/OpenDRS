@@ -14,7 +14,7 @@ The project consists of a modular, two-part system to separate analysis from exe
 *   **`Get-OpenDrsRecommendation.ps1`**: A read-only "engine" that analyzes cluster health and generates migration recommendations.
 *   **`Invoke-OpenDrsMigration.ps1`**: An "executor" that consumes recommendations from the engine and performs the actual VM migrations.
 
-The engine script always displays full analysis output including per-cluster host utilization tables, cluster balance statistics, and recommendation tables. When executing migrations, `Invoke-OpenDrsMigration.ps1` directs the engine to leave the vCenter session open and manages disconnection after all operations complete.
+Both scripts feature intelligent connection management - they detect existing vCenter connections and only connect/disconnect when necessary. This enables efficient chaining and pipeline usage.
 
 All scripts automatically exclude hosts in maintenance mode from both analysis and migration targeting, ensuring that only operational hosts are considered for workload balancing.
 
@@ -33,6 +33,7 @@ All scripts automatically exclude hosts in maintenance mode from both analysis a
     *   `-MigrationThreshold` (integer, 1–5): Controls the aggressiveness of recommendations (1=conservative, 5=aggressive). Defaults to 3.
     *   `-BypassHostRulesAndGroups` (switch): If set, recommendations will ignore all VM/Host affinity and anti-affinity rules.
     *   `-ExportToCsv` (switch): Exports recommendations to a timestamped CSV file when recommendations exist.
+    *   `-Quiet` (switch): Suppresses console output for pipeline scenarios.
     *   `-NoDisconnect` (switch): Internal parameter to prevent disconnecting from vCenter when called by other scripts.
 *   **Output:**  
     Always displays complete cluster analysis including host utilization tables, cluster balance statistics, and recommendation tables. Returns an array of `PSCustomObject`s representing migration recommendations.
@@ -40,16 +41,16 @@ All scripts automatically exclude hosts in maintenance mode from both analysis a
 ### 3.2. Invoke-OpenDrsMigration.ps1 (The Executor)
 
 *   **Role:**  
-    Executes the VM migrations recommended by the engine. This is the only script that performs **write operations**.
+    Executes the VM migrations recommended by the engine. This is the only script that performs **write operations**. Supports pipeline input for direct consumption of recommendations.
 *   **Behavior:**  
-    1.  Calls `Get-OpenDrsRecommendation.ps1` internally, displaying all analysis output to the user.
-    2.  Uses `ShouldProcess` (`-WhatIf`/`-Confirm`) to show exactly what migrations would be performed.
-    3.  Executes `Move-VM` operations with high vMotion priority for each recommendation.
-    4.  Logs the success or failure of each migration attempt.
-    5.  Manages the vCenter connection lifecycle, disconnecting only after all work is complete.
+    1.  If used standalone, calls `Get-OpenDrsRecommendation.ps1` internally, displaying all analysis output.
+    2.  If used in pipeline, accepts recommendation objects directly from `Get-OpenDrsRecommendation.ps1`.
+    3.  Uses `ShouldProcess` (`-WhatIf`/`-Confirm`) to show exactly what migrations would be performed.
+    4.  Executes `Move-VM` operations with high vMotion priority for each recommendation.
+    5.  Logs the success or failure of each migration attempt.
 *   **Parameters:**
-    *   `-vCenterServer` (string, Required): FQDN or IP address of the vCenter Server.
-    *   `-ExportToCsv`, `-BypassHostRulesAndGroups`, `-MigrationThreshold`: Passthrough parameters for the analysis engine.
+    *   `-vCenterServer` (string): FQDN or IP address of the vCenter Server (required for standalone use, optional for pipeline).
+    *   `-ExportToCsv`, `-BypassHostRulesAndGroups`, `-MigrationThreshold`: Passthrough parameters for the analysis engine (standalone mode only).
     *   `-WhatIf`, `-Confirm`: Natively supported via `CmdletBinding` to allow users to preview actions before execution.
 *   **Output:**  
     Displays complete cluster analysis followed by migration execution status and results.
@@ -78,6 +79,11 @@ All scripts automatically exclude hosts in maintenance mode from both analysis a
 .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -MigrationThreshold 5 -ExportToCsv
 ```
 
+### Pipeline usage for efficient processing:
+```powershell
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Quiet | .\Invoke-OpenDrsMigration.ps1
+```
+
 ## 4.1. Invoke-OpenDrsMigration.ps1 Parameter Behavior
 
 The `Invoke-OpenDrsMigration.ps1` script supports different execution modes through PowerShell's `ShouldProcess` framework:
@@ -101,7 +107,32 @@ The `Invoke-OpenDrsMigration.ps1` script supports different execution modes thro
 
 ---
 
-## 5. Requirements
+## 5. Advanced Features
+
+### 5.1. Smart Connection Management
+Both scripts intelligently manage vCenter connections:
+- **Reuse existing connections** when already connected to the target server
+- **Only connect when necessary**, avoiding unnecessary disconnection/reconnection cycles  
+- **Independent operation** - each script manages its own connection lifecycle
+- **Clear status messages** indicating connection decisions
+
+### 5.2. Pipeline Support
+The scripts support efficient chaining using PowerShell variable assignment:
+```powershell
+# Efficient chaining with quiet analysis output
+$recommendations = .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter" -Quiet -NoDisconnect
+if ($recommendations) { .\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter" }
+
+# Traditional separate execution (shows full analysis output)
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter"
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter"
+```
+
+The `-Quiet` parameter suppresses console output from the analysis engine while preserving all returned recommendation objects. Both scripts share vCenter connections efficiently, avoiding unnecessary reconnections.
+
+---
+
+## 6. Requirements
 
 *   **VMware PowerCLI**: Must be installed and available (VMware.PowerCLI or VCF.PowerCLI)
 *   **vCenter Access**: Appropriate permissions for VM migration operations
@@ -109,9 +140,9 @@ The `Invoke-OpenDrsMigration.ps1` script supports different execution modes thro
 
 ---
 
-## 6. Technical Details
+## 7. Technical Details
 
-### 6.1. Algorithm
+### 7.1. Algorithm
 The scripts use statistical analysis (standard deviation) to identify cluster imbalances:
 - Calculate average CPU and memory utilization across cluster hosts
 - Identify hosts exceeding threshold based on standard deviation multiplier
@@ -119,13 +150,13 @@ The scripts use statistical analysis (standard deviation) to identify cluster im
 - Respect all VM/Host affinity rules and VM anti-affinity rules unless bypassed
 - Automatically exclude hosts in maintenance mode from all analysis and operations
 
-### 6.2. Rule Compliance
+### 7.2. Rule Compliance
 - **VM/Host Affinity Rules**: VMs required to run on specific host groups are only migrated within those groups
 - **VM/Host Anti-Affinity Rules**: VMs forbidden from specific host groups are never migrated to those hosts
 - **VM Anti-Affinity Rules**: VMs marked to separate are never placed on the same host
 - **Keep Together Rules**: VM groups marked for affinity are migrated as complete units
 
-### 6.3. Safety Features
+### 7.3. Safety Features
 - Read-only analysis engine prevents accidental modifications
 - WhatIf support allows previewing all operations
 - Comprehensive rule validation before any migration

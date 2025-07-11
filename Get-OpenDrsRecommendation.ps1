@@ -5,7 +5,7 @@
     This script connects to a vCenter Server to analyze cluster balance and displays
     all analysis details and recommendations to the console on a per-cluster basis.
 .PARAMETER vCenterServer
-    The FQDN or IP address of the vCenter Server. Defaults to 'vcenter.nicholls.edu'.
+    The FQDN or IP address of the vCenter Server.
 .PARAMETER ExportToCsv
     If specified, exports all migration recommendations to a single CSV file at the end.
 .PARAMETER BypassHostRulesAndGroups
@@ -24,6 +24,7 @@ param(
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$MigrationThreshold = 3,
     [switch]$NoDisconnect,
+    [switch]$Quiet,  # Suppress console output for pipeline scenarios
     [Alias('h', 'v', 'version')]
     [switch]$help
 )
@@ -31,7 +32,7 @@ param(
 # --- Helper Functions ---
 
 function Show-Usage {
-    Write-Host "Usage: .\Get-DrsRecommendation.ps1 -vCenterServer <server_name> [options]"
+    Write-Host "Usage: .\Get-OpenDrsRecommendation.ps1 -vCenterServer <server_name> [options]"
     Write-Host ""
     Write-Host "A read-only script that analyzes VMware vSphere cluster balance and provides VM migration recommendations."
     Write-Host ""
@@ -40,6 +41,7 @@ function Show-Usage {
     Write-Host "  -ExportToCsv                Export recommendations to a CSV file (only if recommendations exist)."
     Write-Host "  -BypassHostRulesAndGroups   Ignore VM/Host affinity rules."
     Write-Host "  -MigrationThreshold <1-5>   Set migration aggressiveness (1=conservative, 5=aggressive). Default is 3."
+    Write-Host "  -Quiet                      Suppress console output for pipeline scenarios."
     Write-Host "  -Verbose                    Output detailed diagnostic information."
     Write-Host "  -help, -h, -version, -v     Show this help message."
 }
@@ -57,36 +59,74 @@ function Get-StandardDeviation {
     $sumOfSquares = ($array | ForEach-Object { [math]::Pow($_ - $average, 2) }) | Measure-Object -Sum | Select-Object -ExpandProperty Sum
     return [math]::Sqrt($sumOfSquares / ($array.Count - 1))
 }
-# --- Main Script Body ---
-# Connect to the specified vCenter Server. If a session already exists to a different
-# vCenter, it will be disconnected first.
-try {
-    Write-Host "Attempting to connect to vCenter Server: $vCenterServer..."
-    if ($global:DefaultVIServer.Name -ne $vCenterServer) {
-        if ($global:DefaultVIServer) {
-            Write-Host "Disconnecting existing vCenter session."
-            Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force
+
+# Helper function to conditionally write to console unless in Quiet mode
+function Write-ConditionalHost {
+    param(
+        [string]$Message,
+        [System.ConsoleColor]$ForegroundColor
+    )
+    if (-not $Quiet) {
+        if ($ForegroundColor) {
+            Write-Host $Message -ForegroundColor $ForegroundColor
+        } else {
+            Write-Host $Message
         }
-        Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
     }
-    Write-Host "Successfully connected to $vCenterServer."
 }
-catch {
-    Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
-    exit 1
+# --- Main Script Body ---
+# Track whether this script made the connection (and should disconnect later)
+$shouldDisconnect = $false
+
+# Check connection status and connect if needed
+if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
+    # Check if we're connected to the same server (handle FQDN vs hostname differences)
+    $connectedServer = $global:DefaultVIServer.Name
+    $targetServer = $vCenterServer
+    
+    # Compare servers - handle cases where one might be FQDN and other hostname
+    $serversMatch = ($connectedServer -eq $targetServer) -or 
+                   ($connectedServer.Split('.')[0] -eq $targetServer.Split('.')[0])
+    
+    if ($serversMatch) {
+        Write-ConditionalHost "Already connected to vCenter Server: $connectedServer"
+    }
+    else {
+        Write-ConditionalHost "Connecting to vCenter Server: $vCenterServer..."
+        Write-ConditionalHost "Disconnecting existing vCenter session from $connectedServer."
+        Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force
+        Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+        Write-ConditionalHost "Successfully connected to $vCenterServer."
+        $shouldDisconnect = $true
+    }
 }
-Write-Host "`nGathering cluster and host information..."
+else {
+    try {
+        Write-ConditionalHost "Connecting to vCenter Server: $vCenterServer..."
+        Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+        Write-ConditionalHost "Successfully connected to $vCenterServer."
+        $shouldDisconnect = $true
+    }
+    catch {
+        Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
+        exit 1
+    }
+}
+Write-ConditionalHost "`nGathering cluster and host information..."
 $allRecommendations = @()
 $clusters = Get-Cluster
 if (-not $clusters) {
     Write-Warning "No clusters found on $vCenterServer."
-    Disconnect-VIServer -Confirm:$false -Force
+    if ($shouldDisconnect) {
+        Write-ConditionalHost "Disconnecting from $vCenterServer (connection made by this script)."
+        Disconnect-VIServer -Confirm:$false -Force
+    }
     exit 0
 }
 # Iterate through each cluster found on the vCenter Server.
 foreach ($cluster in $clusters) {
     $clusterRecommendations = @()
-    Write-Host "`n--- Analyzing Cluster: $($cluster.Name) ---"
+    Write-ConditionalHost "`n--- Analyzing Cluster: $($cluster.Name) ---"
     # Get all connected hosts in the current cluster, excluding those in maintenance mode.
     $hostsInCluster = Get-VMHost -Location $cluster -State Connected
     if ($hostsInCluster.Count -lt 2) {
@@ -98,7 +138,7 @@ foreach ($cluster in $clusters) {
     $vmGroups = @{}
     $hostGroups = @{}
     if (-not $BypassHostRulesAndGroups) {
-        Write-Host "Reading DRS Rules and Groups for cluster '$($cluster.Name)'..."
+        Write-ConditionalHost "Reading DRS Rules and Groups for cluster '$($cluster.Name)'..."
         $drsRules = Get-DrsRule -Cluster $cluster -WarningAction SilentlyContinue
         $clusterView = Get-View -Id $cluster.Id
         if ($clusterView.Configuration.Group) {
@@ -133,21 +173,23 @@ foreach ($cluster in $clusters) {
             MemUsagePercent = [math]::Round(($esxiHost.MemoryUsageGB / $esxiHost.MemoryTotalGB) * 100, 2)
         }
     }
-    Write-Host "Host Utilization in Cluster '$($cluster.Name)':"
-    $hostStats | Format-Table -AutoSize | Out-Host
+    Write-ConditionalHost "Host Utilization in Cluster '$($cluster.Name)':"
+    if (-not $Quiet) {
+        $hostStats | Format-Table -AutoSize | Out-Host
+    }
     # Calculate the average and standard deviation for CPU and Memory usage across the cluster.
     $avgCpu = $hostStats.CpuUsagePercent | Measure-Object -Average | Select-Object -ExpandProperty Average
     $avgMem = $hostStats.MemUsagePercent | Measure-Object -Average | Select-Object -ExpandProperty Average
     $stdDevCpu = Get-StandardDeviation -array $hostStats.CpuUsagePercent
     $stdDevMem = Get-StandardDeviation -array $hostStats.MemUsagePercent
-    Write-Host "Cluster Balance Statistics:"
-    Write-Host "  Average CPU Utilization: $([math]::Round($avgCpu, 2))%"
-    Write-Host "  CPU Standard Deviation:  $([math]::Round($stdDevCpu, 2))"
-    Write-Host "  Average Memory Utilization: $([math]::Round($avgMem, 2))%"
-    Write-Host "  Memory Standard Deviation:  $([math]::Round($stdDevMem, 2))"
+    Write-ConditionalHost "Cluster Balance Statistics:"
+    Write-ConditionalHost "  Average CPU Utilization: $([math]::Round($avgCpu, 2))%"
+    Write-ConditionalHost "  CPU Standard Deviation:  $([math]::Round($stdDevCpu, 2))"
+    Write-ConditionalHost "  Average Memory Utilization: $([math]::Round($avgMem, 2))%"
+    Write-ConditionalHost "  Memory Standard Deviation:  $([math]::Round($stdDevMem, 2))"
     # --- Generate Migration Recommendations ---
     $recommendationVerb = if ($BypassHostRulesAndGroups) { "bypassing" } else { "respecting" }
-    Write-Host "`nGenerating migration recommendations ($recommendationVerb DRS rules)..."
+    Write-ConditionalHost "`nGenerating migration recommendations ($recommendationVerb DRS rules)..."
     # Map the user-defined threshold (1-5) to a standard deviation multiplier.
     # A more aggressive threshold (e.g., 5) results in a smaller multiplier, making the 
     # script more sensitive to imbalances.
@@ -159,7 +201,7 @@ foreach ($cluster in $clusters) {
         5 { 0.5 }
         default { 1.0 }
     }
-    Write-Host "Migration threshold set to level $MigrationThreshold (StdDev Multiplier: $stdDevMultiplier)"
+    Write-ConditionalHost "Migration threshold set to level $MigrationThreshold (StdDev Multiplier: $stdDevMultiplier)"
     # Determine the CPU and Memory thresholds for a host to be considered "over-utilized".
     $cpuThreshold = $avgCpu + ($stdDevCpu * $stdDevMultiplier)
     $memThreshold = $avgMem + ($stdDevMem * $stdDevMultiplier)
@@ -386,12 +428,14 @@ foreach ($cluster in $clusters) {
 
     # Display recommendations for the current cluster.
     if ($clusterRecommendations.Count -gt 0) {
-        Write-Host "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
-        $clusterRecommendations | Format-Table -AutoSize | Out-Host
+        Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+        if (-not $Quiet) {
+            $clusterRecommendations | Format-Table -AutoSize | Out-Host
+        }
     }
     else {
-        Write-Host "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
-        Write-Host "No migration recommendations for this cluster." -ForegroundColor Yellow
+        Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+        Write-ConditionalHost "No migration recommendations for this cluster." -ForegroundColor Yellow
     }
     $allRecommendations += $clusterRecommendations
 }
@@ -403,14 +447,21 @@ if ($ExportToCsv -and $allRecommendations) {
         $fileName = "$timestamp-drs_recommendations.csv"
         $filePath = Join-Path -Path $PSScriptRoot -ChildPath $fileName
         $allRecommendations | Export-Csv -Path $filePath -NoTypeInformation -Force -WhatIf:$false
-        Write-Host "`nAll recommendations have been exported to: $filePath"
+        Write-ConditionalHost "`nAll recommendations have been exported to: $filePath"
     }
     catch { Write-Error "Failed to export recommendations to CSV. `n$($_.Exception.Message)" }
 }
-# Disconnect from the vCenter Server, unless specifically told not to.
-if (-not $NoDisconnect) {
-    Write-Host "`nAnalysis complete. Disconnecting from $vCenterServer."
+# Disconnect from the vCenter Server only if this script made the connection
+# or if explicitly told not to disconnect via NoDisconnect parameter
+if (-not $NoDisconnect -and $shouldDisconnect) {
+    Write-ConditionalHost "`nAnalysis complete. Disconnecting from $vCenterServer (connection made by this script)."
     Disconnect-VIServer -Confirm:$false -Force
+}
+elseif (-not $NoDisconnect -and -not $shouldDisconnect) {
+    Write-ConditionalHost "`nAnalysis complete. Leaving existing vCenter connection open."
+}
+elseif ($NoDisconnect) {
+    Write-ConditionalHost "`nAnalysis complete. Leaving vCenter connection open as requested."
 }
 # Return all recommendation objects, making them available to any calling script.
 # Filter out any invalid recommendations before returning
