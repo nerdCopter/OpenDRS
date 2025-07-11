@@ -35,8 +35,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$vCenterServer,
+    [string]$vCenterServer = 'vcenter',
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$MigrationThreshold = 3
 )
@@ -45,7 +44,7 @@ Write-Host "=== OpenDRS Usage Example ===" -ForegroundColor Cyan
 Write-Host "Demonstrating different usage patterns for OpenDRS scripts"
 Write-Host "vCenter Server: $vCenterServer"
 Write-Host "Migration Threshold: $MigrationThreshold"
-if ($WhatIfPreference -eq 'Continue') { Write-Host "Mode: Preview only (WhatIf)" -ForegroundColor Yellow }
+Write-Host "Mode: Preview only (WhatIf enforced for safety)" -ForegroundColor Yellow
 Write-Host ""
 
 # Method 1: Traditional approach - separate execution with full analysis output
@@ -63,12 +62,12 @@ $recommendations = & "$PSScriptRoot\Get-OpenDrsRecommendation.ps1" @getArgs
 
 if ($recommendations -and $recommendations.Count -gt 0) {
     Write-Host ""
-    Write-Host "Step 2: Executing migrations based on $($recommendations.Count) recommendations..." -ForegroundColor Yellow
+    Write-Host "Step 2: Executing migrations (WhatIf only) based on $($recommendations.Count) recommendations..." -ForegroundColor Yellow
     $invokeArgs = @{
         vCenterServer = $vCenterServer
         MigrationThreshold = $MigrationThreshold
+        WhatIf = $true  # Always use WhatIf for safety
     }
-    if ($WhatIfPreference -eq 'Continue') { $invokeArgs['WhatIf'] = $true }
     
     & "$PSScriptRoot\Invoke-OpenDrsMigration.ps1" @invokeArgs
 } else {
@@ -98,12 +97,10 @@ try {
     if ($quietRecommendations -and $quietRecommendations.Count -gt 0) {
         Write-Host "Retrieved $($quietRecommendations.Count) recommendations quietly" -ForegroundColor Green
         
-        Write-Host "Processing recommendations..." -ForegroundColor Yellow
-        # Process recommendations - in a real scenario, you could pass these to Invoke-OpenDrsMigration
-        # For demonstration, we'll show what would be processed
+        Write-Host "Processing recommendations (WhatIf only)..." -ForegroundColor Yellow
+        # Process recommendations - always using WhatIf for safety in this example
         foreach ($rec in $quietRecommendations) {
-            $action = if ($WhatIfPreference -eq 'Continue') { "Would migrate" } else { "Migrating" }
-            Write-Host "  $action VM: $($rec.VM_to_Move) from $($rec.Source_Host) to $($rec.Recommended_Destination_Host)" -ForegroundColor Cyan
+            Write-Host "  Would migrate VM: $($rec.VM_to_Move) from $($rec.Source_Host) to $($rec.Recommended_Destination_Host)" -ForegroundColor Cyan
         }
         
         Write-Host "Efficient chaining completed successfully!" -ForegroundColor Green
@@ -129,4 +126,16 @@ Write-Host "• Add -ExportToCsv to save recommendations to CSV files"
 Write-Host "• Use -BypassHostRulesAndGroups to ignore DRS rules"
 Write-Host "• Adjust -MigrationThreshold (1-5) to control aggressiveness"
 Write-Host ""
+
+# Final cleanup - disconnect from vCenter
+Write-Host "=== Cleanup ===" -ForegroundColor Cyan
+if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
+    Write-Host "Disconnecting from vCenter Server..." -ForegroundColor Yellow
+    Disconnect-VIServer -Confirm:$false -Force -WhatIf:$false
+    Write-Host "Successfully disconnected from vCenter." -ForegroundColor Green
+} else {
+    Write-Host "No active vCenter connection to disconnect." -ForegroundColor Yellow
+}
+Write-Host ""
+
 Write-Host "=== Example Complete ===" -ForegroundColor Cyan

@@ -16,15 +16,22 @@
 .OUTPUTS
     An array of PSCustomObjects, where each object represents a single VM migration recommendation.
 #>
-[CmdletBinding()]
+[CmdletBinding(PositionalBinding=$false)]
 param(
+    [Parameter()]
     [string]$vCenterServer,
+    [Parameter()]
     [switch]$ExportToCsv,
+    [Parameter()]
     [switch]$BypassHostRulesAndGroups,
+    [Parameter()]
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$MigrationThreshold = 3,
+    [Parameter()]
     [switch]$NoDisconnect,
+    [Parameter()]
     [switch]$Quiet,  # Suppress console output for pipeline scenarios
+    [Parameter()]
     [Alias('h', 'v', 'version')]
     [switch]$help
 )
@@ -94,7 +101,7 @@ if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
     else {
         Write-ConditionalHost "Connecting to vCenter Server: $vCenterServer..."
         Write-ConditionalHost "Disconnecting existing vCenter session from $connectedServer."
-        Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force
+        Disconnect-VIServer -Server $global:DefaultVIServer -Confirm:$false -Force -WhatIf:$false
         Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
         Write-ConditionalHost "Successfully connected to $vCenterServer."
         $shouldDisconnect = $true
@@ -118,8 +125,8 @@ $clusters = Get-Cluster
 if (-not $clusters) {
     Write-Warning "No clusters found on $vCenterServer."
     if ($shouldDisconnect) {
-        Write-ConditionalHost "Disconnecting from $vCenterServer (connection made by this script)."
-        Disconnect-VIServer -Confirm:$false -Force
+        Write-ConditionalHost "Disconnecting from $vCenterServer (connection made by $($MyInvocation.MyCommand.Name))."
+        Disconnect-VIServer -Confirm:$false -Force -WhatIf:$false
     }
     exit 0
 }
@@ -454,8 +461,8 @@ if ($ExportToCsv -and $allRecommendations) {
 # Disconnect from the vCenter Server only if this script made the connection
 # or if explicitly told not to disconnect via NoDisconnect parameter
 if (-not $NoDisconnect -and $shouldDisconnect) {
-    Write-ConditionalHost "`nAnalysis complete. Disconnecting from $vCenterServer (connection made by this script)."
-    Disconnect-VIServer -Confirm:$false -Force
+    Write-ConditionalHost "`nAnalysis complete. Disconnecting from $vCenterServer (connection made by $($MyInvocation.MyCommand.Name))."
+    Disconnect-VIServer -Confirm:$false -Force -WhatIf:$false
 }
 elseif (-not $NoDisconnect -and -not $shouldDisconnect) {
     Write-ConditionalHost "`nAnalysis complete. Leaving existing vCenter connection open."
