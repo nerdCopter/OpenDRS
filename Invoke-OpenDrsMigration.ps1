@@ -6,6 +6,9 @@
     This is the main user-facing script. It calls the 'Get-OpenDrsRecommendation.ps1' engine to
     generate a list of migrations. It then displays these recommendations and, after user
     confirmation, executes the migrations.
+    
+    Automatically handles maintenance mode evacuations with critical priority.
+    Supports both powered-on (vMotion) and powered-off (cold migration) VMs during evacuation.
 
 .PARAMETER vCenterServer
     The fully qualified domain name (FQDN) or IP address of the vCenter Server.
@@ -52,9 +55,9 @@
     Loads migration recommendations from a CSV file and executes them.
 
 .NOTES
-    Version:        0.9.0
+    Version:        0.10.0
     Author:         NJD
-    Creation Date:  July 9, 2025
+    Creation Date:  July 14, 2025
     License:        GNU Affero General Public License v3.0 (AGPL-3.0)
 #>
 [CmdletBinding(SupportsShouldProcess=$true, PositionalBinding=$false)]
@@ -192,8 +195,22 @@ if ($allRecommendations.Count -eq 0) {
     # Debug: Show what we received from the engine
     Write-Host "`nReceived $($allRecommendations.Count) recommendations from engine."
     if ($allRecommendations.Count -gt 0) {
-        foreach ($rec in $allRecommendations) {
-            Write-Host "VM '$($rec.VM_to_Move)' -> Host '$($rec.Recommended_Destination_Host)'"
+        # Separate evacuation from normal recommendations
+        $evacuationRecs = $allRecommendations | Where-Object { $_.Reason -eq "MAINTENANCE_MODE_EVACUATION" }
+        $normalRecs = $allRecommendations | Where-Object { $_.Reason -ne "MAINTENANCE_MODE_EVACUATION" }
+        
+        if ($evacuationRecs.Count -gt 0) {
+            Write-Host "`n*** CRITICAL: $($evacuationRecs.Count) MAINTENANCE MODE EVACUATION(S) ***" -ForegroundColor Red
+            foreach ($rec in $evacuationRecs) {
+                Write-Host "[EVACUATION] VM '$($rec.VM_to_Move)' -> Host '$($rec.Recommended_Destination_Host)' (Power: $($rec.Power_State))" -ForegroundColor Yellow
+            }
+        }
+        
+        if ($normalRecs.Count -gt 0) {
+            Write-Host "`nNormal DRS Recommendations:" -ForegroundColor Cyan
+            foreach ($rec in $normalRecs) {
+                Write-Host "VM '$($rec.VM_to_Move)' -> Host '$($rec.Recommended_Destination_Host)'"
+            }
         }
     }
 }
@@ -228,22 +245,51 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
     
     foreach ($rec in $allRecommendations) {
         try {
+            # Check if this is a maintenance mode evacuation
+            $isEvacuation = $rec.Reason -eq "MAINTENANCE_MODE_EVACUATION"
+            $evacuationPrefix = if ($isEvacuation) { "[EVACUATION] " } else { "" }
+            
             if ($PSCmdlet.ShouldProcess("VM '$($rec.VM_to_Move)' from '$($rec.Source_Host)' to '$($rec.Recommended_Destination_Host)'", "Migrate VM")) {
-                Write-Host "Migrating VM '$($rec.VM_to_Move)' to '$($rec.Recommended_Destination_Host)'..."
+                Write-Host "${evacuationPrefix}Migrating VM '$($rec.VM_to_Move)' to '$($rec.Recommended_Destination_Host)'..."
+                
                 $vmToMove = Get-VM -Name $rec.VM_to_Move -ErrorAction Stop
                 $destinationHost = Get-VMHost -Name $rec.Recommended_Destination_Host -ErrorAction Stop
-                Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
-                Write-Host "✓ Successfully migrated VM '$($rec.VM_to_Move)'" -ForegroundColor Green
+                
+                # Handle both powered-on and powered-off VMs
+                if ($vmToMove.PowerState -eq 'PoweredOn') {
+                    # Use vMotion for powered-on VMs
+                    Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
+                    Write-Host "✓ ${evacuationPrefix}Successfully migrated VM '$($rec.VM_to_Move)' (vMotion)" -ForegroundColor Green
+                } elseif ($vmToMove.PowerState -eq 'PoweredOff') {
+                    # Use storage migration for powered-off VMs
+                    Move-VM -VM $vmToMove -Destination $destinationHost -ErrorAction Stop
+                    Write-Host "✓ ${evacuationPrefix}Successfully migrated VM '$($rec.VM_to_Move)' (cold migration)" -ForegroundColor Green
+                } else {
+                    Write-Warning "${evacuationPrefix}VM '$($rec.VM_to_Move)' is in '$($vmToMove.PowerState)' state. Skipping migration."
+                    continue
+                }
+                
                 $successCount++
             }
         }
         catch {
-            Write-Error "Failed to migrate VM '$($rec.VM_to_Move)'. Error: $($_.Exception.Message)"
+            Write-Error "${evacuationPrefix}Failed to migrate VM '$($rec.VM_to_Move)'. Error: $($_.Exception.Message)"
             $failureCount++
         }
     }
     
-    Write-Host "`nMigration Summary: $successCount successful, $failureCount failed."
+    # Provide detailed summary
+    $evacuationCount = ($allRecommendations | Where-Object { $_.Reason -eq "MAINTENANCE_MODE_EVACUATION" }).Count
+    $normalCount = ($allRecommendations | Where-Object { $_.Reason -ne "MAINTENANCE_MODE_EVACUATION" }).Count
+    
+    Write-Host "`nMigration Summary:"
+    if ($evacuationCount -gt 0) {
+        Write-Host "  Maintenance Mode Evacuations: $evacuationCount processed" -ForegroundColor Yellow
+    }
+    if ($normalCount -gt 0) {
+        Write-Host "  Normal DRS Migrations: $normalCount processed" -ForegroundColor Cyan
+    }
+    Write-Host "  Total: $successCount successful, $failureCount failed" -ForegroundColor $(if ($failureCount -eq 0) { 'Green' } else { 'Red' })
 }
 else {
     Write-Host "`nNo migration recommendations to process."

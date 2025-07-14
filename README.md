@@ -16,7 +16,7 @@ The project consists of a modular, two-part system to separate analysis from exe
 
 Both scripts feature intelligent connection management - they detect existing vCenter connections and only connect/disconnect when necessary. This enables efficient chaining and pipeline usage.
 
-All scripts automatically exclude hosts in maintenance mode from both analysis and migration targeting, ensuring that only operational hosts are considered for workload balancing.
+The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that take priority over normal DRS analysis. Maintenance mode evacuations bypass all rules and ensure rapid VM evacuation.
 
 ---
 
@@ -170,3 +170,38 @@ The scripts use statistical analysis (standard deviation) to identify cluster im
 - **VMware vCenter Server 8.0.3.00500**
 - **VMware ESXi 8.0.3** (build 24674464)
 - **VMware ESXi 7.0.3** (build 24723872)
+
+---
+
+## 4.2. Maintenance Mode Evacuation
+
+The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that bypass all DRS rules and affinity groups.
+
+### Detection Method
+- **Hosts in Maintenance Mode**: `ConnectionState -eq 'Maintenance'`
+- **Hosts Entering Maintenance Mode**: Uses `Get-Task -Status Running` to find active "EnterMaintenanceMode" tasks
+
+### Evacuation Behavior
+- **Processing Order**: Evacuation recommendations are processed first
+- **Rule Bypassing**: All VM/Host affinity rules and groups are automatically bypassed for evacuations
+- **VM Support**: Handles both powered-on (vMotion) and powered-off (cold migration) VMs
+- **Load Balancing**: Distributes evacuated VMs across available hosts
+- **Combined Analysis**: Both evacuation and normal DRS recommendations are generated and included in the output
+
+### Examples
+```powershell
+# Check for maintenance mode evacuations
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Verbose
+
+# Execute evacuations with preview
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -WhatIf
+
+# Test maintenance mode detection
+.\Test-MaintenanceModeEvacuation.ps1 -vCenterServer "vcenter.domain.com"
+```
+
+### Output Format
+Evacuation recommendations include:
+- `Reason`: "Maintenance Evacuation"
+- Console output displays evacuation recommendations clearly in tables
+- Both evacuation and normal DRS recommendations are combined in the final output

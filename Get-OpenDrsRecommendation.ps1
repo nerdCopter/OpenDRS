@@ -2,8 +2,29 @@
 .SYNOPSIS
     A read-only script that analyzes VMware vSphere cluster balance and provides VM migration recommendations.
 .DESCRIPTION
-    This script connects to a vCenter Server to analyze cluster balance and displays
-    all analysis details and recommendations to the console on a per-cluster basis.
+    This script connects to a vCenter Server to analyze cluster balance and displays    # Get all connected hosts in the current cluster, excluding those in maintenance mode or entering maintenance mode.
+    $hostsInCluster = Get-VMHost -Location $cluster -State Connected | Where-Object { 
+        $_.Name -notin $allMaintenanceHosts.Name 
+    }
+    if ($hostsInCluster.Count -lt 2) {
+        Write-Warning "Cluster '$($cluster.Name)' has fewer than two hosts. DRS analysis is not applicable."
+        
+        # Still add any evacuation recommendations to the final results
+        if ($clusterRecommendations.Count -gt 0) {
+            Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+            Write-ConditionalHost "  Total Recommendations: $($clusterRecommendations.Count)" -ForegroundColor Cyan
+            
+            if (-not $Quiet) {
+                $clusterRecommendations | Format-Table -AutoSize | Out-Host
+            }
+        }
+        $allRecommendations += $clusterRecommendations
+        continue
+    } analysis details and recommendations to the console on a per-cluster basis.
+    
+    Automatically detects hosts in maintenance mode or entering maintenance mode and generates 
+    critical evacuation recommendations that bypass all DRS rules and affinity groups.
+    Both evacuation and normal DRS recommendations are combined in the output.
 .PARAMETER vCenterServer
     The FQDN or IP address of the vCenter Server.
 .PARAMETER ExportToCsv
@@ -134,10 +155,108 @@ if (-not $clusters) {
 foreach ($cluster in $clusters) {
     $clusterRecommendations = @()
     Write-ConditionalHost "`n--- Analyzing Cluster: $($cluster.Name) ---"
-    # Get all connected hosts in the current cluster, excluding those in maintenance mode.
-    $hostsInCluster = Get-VMHost -Location $cluster -State Connected
+    
+    # Get ALL hosts in the cluster (including those entering maintenance mode)
+    $allHostsInCluster = Get-VMHost -Location $cluster
+    
+    # Check for hosts in maintenance mode or entering maintenance mode
+    $maintenanceModeHosts = $allHostsInCluster | Where-Object { 
+        # Host is already in maintenance mode
+        $_.ConnectionState -eq 'Maintenance'
+    }
+    
+    # Also check for hosts currently entering maintenance mode (active tasks)
+    $hostsEnteringMaintenance = foreach ($esxiHost in $allHostsInCluster) {
+        $maintenanceTasks = Get-Task -Status Running | Where-Object { 
+            $_.ObjectId -eq $esxiHost.Id -and 
+            $_.Name -like "*EnterMaintenanceMode*"
+        }
+        if ($maintenanceTasks) {
+            $esxiHost
+        }
+    }
+    
+    # Combine both sets
+    $allMaintenanceHosts = @($maintenanceModeHosts) + @($hostsEnteringMaintenance) | Sort-Object Name | Get-Unique
+    
+    # Process maintenance mode evacuations first (highest priority)
+    if ($allMaintenanceHosts.Count -gt 0) {
+        Write-ConditionalHost "Found $($allMaintenanceHosts.Count) host(s) in or entering maintenance mode."
+        
+        foreach ($maintenanceHost in $allMaintenanceHosts) {
+            Write-ConditionalHost "Processing evacuation for host: $($maintenanceHost.Name) (State: $($maintenanceHost.ConnectionState))"
+            
+            # Get all VMs on the maintenance mode host
+            $vmsToEvacuate = Get-VM -Location $maintenanceHost | Where-Object { $_.PowerState -eq 'PoweredOn' -or $_.PowerState -eq 'PoweredOff' }
+            
+            if ($vmsToEvacuate.Count -gt 0) {
+                Write-ConditionalHost "  Found $($vmsToEvacuate.Count) VM(s) requiring evacuation from $($maintenanceHost.Name)"
+                
+                # Get available destination hosts (connected and not in maintenance mode)
+                $availableHosts = $allHostsInCluster | Where-Object { 
+                    $_.ConnectionState -eq 'Connected' -and 
+                    $_.Name -ne $maintenanceHost.Name -and
+                    $_.Name -notin $allMaintenanceHosts.Name
+                }
+                
+                if ($availableHosts.Count -eq 0) {
+                    Write-Warning "No available destination hosts found for evacuation from $($maintenanceHost.Name)"
+                    continue
+                }
+                
+                # Distribute VMs across available hosts for load balancing
+                $hostIndex = 0
+                foreach ($vm in $vmsToEvacuate) {
+                    $destinationHost = $availableHosts[$hostIndex % $availableHosts.Count]
+                    
+                    # Create evacuation recommendation (bypasses all rules for maintenance mode)
+                    $recommendation = [PSCustomObject]@{
+                        Cluster = $cluster.Name
+                        VM_to_Move = $vm.Name
+                        Reason = "Maintenance Evacuation"
+                        Source_Host = $maintenanceHost.Name
+                        Source_Host_CPU = "-"
+                        Source_Host_Mem = "-"
+                        Recommended_Destination_Host = $destinationHost.Name
+                        Destination_Host_CPU = "-"
+                        Destination_Host_Mem = "-"
+                    }
+                    
+                    $clusterRecommendations += $recommendation
+                    Write-ConditionalHost "    EVACUATION: '$($vm.Name)' -> '$($destinationHost.Name)' (Power: $($vm.PowerState))"
+                    
+                    $hostIndex++
+                }
+            }
+        }
+        
+        Write-ConditionalHost "Maintenance mode evacuation analysis complete. Generated $($clusterRecommendations.Count) evacuation recommendations."
+        
+        # Continue with normal DRS analysis even if we have evacuation recommendations
+        # Both evacuation and normal recommendations will be combined in the final output
+    }
+    
+    # Get all connected hosts in the current cluster, excluding those in maintenance mode or entering maintenance mode.
+    $hostsInCluster = Get-VMHost -Location $cluster -State Connected | Where-Object { 
+        $_.Name -notin $allMaintenanceHosts.Name 
+    }
     if ($hostsInCluster.Count -lt 2) {
         Write-Warning "Cluster '$($cluster.Name)' has fewer than two hosts. DRS analysis is not applicable."
+        
+        # Still display and add any evacuation recommendations to the final results
+        if ($clusterRecommendations.Count -gt 0) {
+            Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+            Write-ConditionalHost "  Total Recommendations: $($clusterRecommendations.Count)" -ForegroundColor Cyan
+            
+            if (-not $Quiet) {
+                $clusterRecommendations | Format-Table -AutoSize | Out-Host
+            }
+        }
+        else {
+            Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+            Write-ConditionalHost "No migration recommendations for this cluster." -ForegroundColor Yellow
+        }
+        $allRecommendations += $clusterRecommendations
         continue
     }
     # Read all DRS rules and VM/Host groups for the current cluster, unless bypassed.
@@ -436,6 +555,8 @@ foreach ($cluster in $clusters) {
     # Display recommendations for the current cluster.
     if ($clusterRecommendations.Count -gt 0) {
         Write-ConditionalHost "`n--- Recommendations for Cluster: $($cluster.Name) ---" -ForegroundColor Green
+        Write-ConditionalHost "  Total Recommendations: $($clusterRecommendations.Count)" -ForegroundColor Cyan
+        
         if (-not $Quiet) {
             $clusterRecommendations | Format-Table -AutoSize | Out-Host
         }
