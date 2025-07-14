@@ -34,6 +34,9 @@
 .PARAMETER MigrationThreshold
     An integer from 1 to 5 that controls the aggressiveness of migration recommendations.
     1 is the most conservative, 5 is the most aggressive. Defaults to 3.
+.PARAMETER Balance
+    If specified, generates load balancing recommendations to evenly distribute VMs across hosts
+    even when hosts are not resource-constrained. Useful for clusters with uneven VM distribution.
 .OUTPUTS
     An array of PSCustomObjects, where each object represents a single VM migration recommendation.
 #>
@@ -48,6 +51,8 @@ param(
     [Parameter()]
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$MigrationThreshold = 3,
+    [Parameter()]
+    [switch]$Balance,  # Enable load balancing recommendations for VM distribution
     [Parameter()]
     [switch]$NoDisconnect,
     [Parameter()]
@@ -69,6 +74,7 @@ function Show-Usage {
     Write-Host "  -ExportToCsv                Export recommendations to a CSV file (only if recommendations exist)."
     Write-Host "  -BypassHostRulesAndGroups   Ignore VM/Host affinity rules."
     Write-Host "  -MigrationThreshold <1-5>   Set migration aggressiveness (1=conservative, 5=aggressive). Default is 3."
+    Write-Host "  -Balance                    Generate load balancing recommendations for even VM distribution."
     Write-Host "  -Quiet                      Suppress console output for pipeline scenarios."
     Write-Host "  -Verbose                    Output detailed diagnostic information."
     Write-Host "  -help, -h, -version, -v     Show this help message."
@@ -551,6 +557,227 @@ foreach ($cluster in $clusters) {
             }
         } # End of loop for VMs on over-utilized hosts
     } # End of check for over/under utilized hosts
+
+    # --- Step 3: Load Balancing Logic (if -Balance parameter is specified) ---
+    if ($Balance -and $hostsInCluster.Count -ge 2) {
+        Write-ConditionalHost "`nProcessing load balancing recommendations..."
+        
+        # Get VM count per host (excluding hosts in maintenance mode and vCLS VMs)
+        $hostVmCounts = @{}
+        foreach ($esxiHost in $hostsInCluster) {
+            # Exclude vCLS VMs (vSphere Cluster Services) from load balancing
+            $vmsOnHost = Get-VM -Location $esxiHost | Where-Object { 
+                $_.PowerState -eq 'PoweredOn' -and 
+                $_.Name -notlike 'vCLS-*' 
+            }
+            $hostVmCounts[$esxiHost.Name] = $vmsOnHost.Count
+        }
+        
+        # Calculate ideal distribution
+        $totalVMs = ($hostVmCounts.Values | Measure-Object -Sum).Sum
+        $idealVMsPerHost = [math]::Floor($totalVMs / $hostsInCluster.Count)
+        $extraVMs = $totalVMs % $hostsInCluster.Count
+        
+        Write-ConditionalHost "Load Balancing Analysis:"
+        Write-ConditionalHost "  Total VMs to distribute: $totalVMs"
+        Write-ConditionalHost "  Ideal VMs per host: $idealVMsPerHost (with $extraVMs host(s) having +1 VM)"
+        
+        # Display current distribution
+        foreach ($kvp in $hostVmCounts.GetEnumerator()) {
+            Write-ConditionalHost "  Host '$($kvp.Key)': $($kvp.Value) VMs"
+        }
+        
+        # Find hosts with too many VMs and hosts with capacity
+        $sourceHosts = @()
+        $targetHosts = @()
+        
+        foreach ($kvp in $hostVmCounts.GetEnumerator()) {
+            $hostName = $kvp.Key
+            $vmCount = $kvp.Value
+            
+            # For load balancing, we want a more aggressive approach than normal DRS
+            # When perfect distribution is possible (no remainder), be more strict about balance
+            if ($extraVMs -eq 0) {
+                # Perfect balance is possible - all hosts should have exactly idealVMsPerHost
+                $allowedMax = $idealVMsPerHost
+                $allowedMin = $idealVMsPerHost
+            } else {
+                # Uneven distribution - allow some hosts to have +1
+                $allowedMax = $idealVMsPerHost + 1
+                $allowedMin = $idealVMsPerHost
+            }
+            
+            Write-ConditionalHost "  Evaluating host '$hostName': $vmCount VMs (allowedMin: $allowedMin, allowedMax: $allowedMax)"
+            
+            if ($vmCount -gt $allowedMax) {
+                $excessVMs = $vmCount - $allowedMax
+                $sourceHosts += [PSCustomObject]@{
+                    HostName = $hostName
+                    CurrentVMs = $vmCount
+                    ExcessVMs = $excessVMs
+                }
+                Write-ConditionalHost "    -> Source host (excess: $excessVMs VMs)"
+            }
+            elseif ($vmCount -lt $allowedMin) {
+                $capacity = $allowedMin - $vmCount
+                $targetHosts += [PSCustomObject]@{
+                    HostName = $hostName
+                    CurrentVMs = $vmCount
+                    Capacity = $capacity
+                }
+                Write-ConditionalHost "    -> Target host (capacity: $capacity VMs)"
+            }
+            else {
+                Write-ConditionalHost "    -> Balanced host (no action needed)"
+            }
+        }
+        
+        # Generate load balancing recommendations
+        if ($sourceHosts.Count -gt 0 -and $targetHosts.Count -gt 0) {
+            Write-ConditionalHost "Generating load balancing recommendations..."
+            Write-ConditionalHost "  Source hosts (with excess VMs): $($sourceHosts.Count)"
+            foreach ($sh in $sourceHosts) {
+                Write-ConditionalHost "    $($sh.HostName): $($sh.CurrentVMs) VMs (excess: $($sh.ExcessVMs))"
+            }
+            Write-ConditionalHost "  Target hosts (with capacity): $($targetHosts.Count)"
+            foreach ($th in $targetHosts) {
+                Write-ConditionalHost "    $($th.HostName): $($th.CurrentVMs) VMs (capacity: $($th.Capacity))"
+            }
+            
+            # Sort source hosts by excess VMs (highest first) and target hosts by capacity (highest first)
+            $sourceHosts = $sourceHosts | Sort-Object ExcessVMs -Descending
+            $targetHosts = $targetHosts | Sort-Object Capacity -Descending
+            
+            foreach ($sourceHost in $sourceHosts) {
+                # Get VMs on this over-loaded host, sorted by resource usage (move smallest first for better distribution)
+                # Exclude vCLS VMs from being moved
+                $vmsToMove = Get-VM -Location (Get-VMHost -Name $sourceHost.HostName) | 
+                    Where-Object { $_.PowerState -eq 'PoweredOn' -and $_.Name -notlike 'vCLS-*' } |
+                    Select-Object Name, Id, VMHost, 
+                        @{N = "CpuUsageMhz"; E = { $_.ExtensionData.Summary.QuickStats.OverallCpuUsage } }, 
+                        @{N = "MemoryUsageGB"; E = { [math]::Round($_.ExtensionData.Summary.QuickStats.GuestMemoryUsage / 1024, 2) } } |
+                    Sort-Object CpuUsageMhz, MemoryUsageGB
+                
+                Write-ConditionalHost "  Processing source host: $($sourceHost.HostName)"
+                Write-ConditionalHost "  Found $($vmsToMove.Count) powered-on VMs to potentially move"
+                if ($vmsToMove.Count -gt 0) {
+                    Write-ConditionalHost "  VMs on $($sourceHost.HostName): $($vmsToMove.Name -join ', ')"
+                }
+                
+                $vmsMovedFromThisHost = 0
+                foreach ($vm in $vmsToMove) {
+                    if ($vmsMovedFromThisHost -ge $sourceHost.ExcessVMs) {
+                        break  # Moved enough VMs from this host
+                    }
+                    
+                    # Find a suitable target host
+                    $bestTarget = $null
+                    foreach ($targetHost in $targetHosts) {
+                        if ($targetHost.Capacity -gt 0) {
+                            # Check if this move respects DRS rules (unless bypassed)
+                            $isValidMove = $true
+                            
+                            if (-not $BypassHostRulesAndGroups) {
+                                # Check VM-VM Anti-Affinity rules
+                                $potentialVmsOnTarget = New-Object System.Collections.Generic.HashSet[string]
+                                [void]$potentialVmsOnTarget.Add($vm.Name)
+                                
+                                # Add VMs currently on target host
+                                $currentVMsOnTarget = Get-VM -Location (Get-VMHost -Name $targetHost.HostName)
+                                $currentVMsOnTarget.Name | ForEach-Object { [void]$potentialVmsOnTarget.Add($_) }
+                                
+                                # Add VMs already recommended to move to this host
+                                ($clusterRecommendations | Where-Object { $_.Recommended_Destination_Host -eq $targetHost.HostName }).VM_to_Move | 
+                                    ForEach-Object { [void]$potentialVmsOnTarget.Add($_) }
+                                
+                                # Check anti-affinity rules
+                                $antiAffinityRules = $drsRules | Where-Object { $_.Enabled -and $_.Type -eq 'VMAntiAffinity' }
+                                foreach ($rule in $antiAffinityRules) {
+                                    $vmsInThisAntiAffinityGroup = @()
+                                    if (-not [string]::IsNullOrEmpty($rule.VMGroupName) -and $vmGroups.ContainsKey($rule.VMGroupName)) {
+                                        $vmsInThisAntiAffinityGroup = $vmGroups[$rule.VMGroupName]
+                                    } elseif ($rule.VMIds) {
+                                        $vmsInThisAntiAffinityGroup = $rule.VMIds | ForEach-Object { (Get-View $_).Name }
+                                    }
+                                    
+                                    if ($vmsInThisAntiAffinityGroup.Count -gt 0) {
+                                        $membersOnTarget = $potentialVmsOnTarget | Where-Object { $vmsInThisAntiAffinityGroup -contains $_ } | Select-Object -Unique
+                                        if ($membersOnTarget.Count -gt 1) {
+                                            $isValidMove = $false
+                                            break
+                                        }
+                                    }
+                                }
+                                
+                                # Check VM-Host rules if move is still valid
+                                if ($isValidMove) {
+                                    $requiredHosts = @(); $forbiddenHosts = @()
+                                    $applicable_vh_rules = $drsRules | Where-Object {
+                                        $_.Enabled -and (-not [string]::IsNullOrEmpty($_.HostGroupName)) -and ($hostGroups.ContainsKey($_.HostGroupName)) -and
+                                        (-not [string]::IsNullOrEmpty($_.VMGroupName)) -and ($vmGroups.ContainsKey($_.VMGroupName)) -and
+                                        ($vmGroups[$_.VMGroupName] -contains $vm.Name)
+                                    }
+                                    foreach ($rule in $applicable_vh_rules) {
+                                        if ($rule.Affine) { $requiredHosts += $hostGroups[$rule.HostGroupName] }
+                                        else { $forbiddenHosts += $hostGroups[$rule.HostGroupName] }
+                                    }
+                                    if (($forbiddenHosts | Select-Object -Unique) -contains $targetHost.HostName) { $isValidMove = $false }
+                                    if (($requiredHosts.Count -gt 0) -and (($requiredHosts | Select-Object -Unique) -notcontains $targetHost.HostName)) { $isValidMove = $false }
+                                }
+                            }
+                            
+                            if ($isValidMove) {
+                                $bestTarget = $targetHost
+                                break
+                            }
+                        }
+                    }
+                    
+                    # Create load balancing recommendation if valid target found
+                    if ($bestTarget) {
+                        $recommendation = [PSCustomObject]@{
+                            Cluster = $cluster.Name
+                            VM_to_Move = $vm.Name
+                            Reason = "Load Balancing"
+                            Source_Host = $sourceHost.HostName
+                            Source_Host_CPU = "-"
+                            Source_Host_Mem = "-"
+                            Recommended_Destination_Host = $bestTarget.HostName
+                            Destination_Host_CPU = "-"
+                            Destination_Host_Mem = "-"
+                        }
+                        $clusterRecommendations += $recommendation
+                        Write-ConditionalHost "    BALANCE: '$($vm.Name)' -> '$($bestTarget.HostName)' (distributing load)"
+                        
+                        # Update counters
+                        $vmsMovedFromThisHost++
+                        $bestTarget.Capacity--
+                        
+                        # Remove target from list if it has no more capacity
+                        if ($bestTarget.Capacity -eq 0) {
+                            $targetHosts = $targetHosts | Where-Object { $_.HostName -ne $bestTarget.HostName }
+                        }
+                    }
+                    else {
+                        if (-not $BypassHostRulesAndGroups) {
+                            Write-ConditionalHost "    Could not find valid target for '$($vm.Name)' due to DRS rules"
+                        }
+                    }
+                }
+            }
+            
+            if ($clusterRecommendations | Where-Object { $_.Reason -eq "Load Balancing" }) {
+                $balanceRecommendations = ($clusterRecommendations | Where-Object { $_.Reason -eq "Load Balancing" }).Count
+                Write-ConditionalHost "Load balancing analysis complete. Generated $balanceRecommendations load balancing recommendations."
+            }
+            else {
+                Write-ConditionalHost "Load balancing analysis complete. No valid load balancing moves found."
+            }
+        }
+        else {
+            Write-ConditionalHost "Load balancing analysis: Cluster is already well-balanced."
+        }
+    }
 
     # Display recommendations for the current cluster.
     if ($clusterRecommendations.Count -gt 0) {

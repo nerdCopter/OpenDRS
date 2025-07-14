@@ -27,16 +27,17 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 *   **Role:**  
     The primary analysis engine. It is strictly **read-only** and makes no changes to the vSphere environment.
 *   **Behavior:**  
-    Connects to vCenter, gathers host and VM statistics for each cluster, calculates cluster balance using standard deviation analysis, and identifies over-utilized and under-utilized hosts. Generates migration recommendations while respecting VM/Host affinity rules and VM anti-affinity rules.
+    Connects to vCenter, gathers host and VM statistics for each cluster, calculates cluster balance using standard deviation analysis, and identifies over-utilized and under-utilized hosts. Generates migration recommendations while respecting VM/Host affinity rules and VM anti-affinity rules. Automatically detects hosts in maintenance mode or entering maintenance mode and generates evacuation recommendations that take priority over normal DRS analysis.
 *   **Parameters:**
     *   `-vCenterServer` (string, Required): FQDN or IP address of the vCenter Server.
     *   `-MigrationThreshold` (integer, 1–5): Controls the aggressiveness of recommendations (1=conservative, 5=aggressive). Defaults to 3.
+    *   `-Balance` (switch): Generates load balancing recommendations to evenly distribute VMs across hosts, even when hosts are not resource-constrained. Useful for clusters with uneven VM distribution. Excludes vCLS (vSphere Cluster Services) VMs from balancing calculations.
     *   `-BypassHostRulesAndGroups` (switch): If set, recommendations will ignore all VM/Host affinity and anti-affinity rules.
     *   `-ExportToCsv` (switch): Exports recommendations to a timestamped CSV file when recommendations exist.
     *   `-Quiet` (switch): Suppresses console output for pipeline scenarios.
     *   `-NoDisconnect` (switch): Internal parameter to prevent disconnecting from vCenter when called by other scripts.
 *   **Output:**  
-    Always displays complete cluster analysis including host utilization tables, cluster balance statistics, and recommendation tables. Returns an array of `PSCustomObject`s representing migration recommendations.
+    Always displays complete cluster analysis including host utilization tables, cluster balance statistics, and recommendation tables. Returns an array of `PSCustomObject`s representing migration recommendations (including evacuation, normal DRS, and load balancing recommendations).
 
 ### 3.2. Invoke-OpenDrsMigration.ps1 (The Executor)
 
@@ -50,10 +51,10 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
     5.  Logs the success or failure of each migration attempt.
 *   **Parameters:**
     *   `-vCenterServer` (string): FQDN or IP address of the vCenter Server (required for standalone use, optional for pipeline).
-    *   `-ExportToCsv`, `-BypassHostRulesAndGroups`, `-MigrationThreshold`: Passthrough parameters for the analysis engine (standalone mode only).
+    *   `-ExportToCsv`, `-Balance`, `-BypassHostRulesAndGroups`, `-MigrationThreshold`: Passthrough parameters for the analysis engine (standalone mode only).
     *   `-WhatIf`, `-Confirm`: Natively supported via `CmdletBinding` to allow users to preview actions before execution.
 *   **Output:**  
-    Displays complete cluster analysis followed by migration execution status and results.
+    Displays complete cluster analysis followed by migration execution status and results. Executes all types of recommendations including evacuation (highest priority), normal DRS, and load balancing migrations.
 
 ---
 
@@ -79,6 +80,16 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -MigrationThreshold 5 -ExportToCsv
 ```
 
+### Load balancing for even VM distribution:
+```powershell
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Balance
+```
+
+### Execute load balancing migrations:
+```powershell
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Balance
+```
+
 ### Pipeline usage for efficient processing:
 ```powershell
 .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Quiet | .\Invoke-OpenDrsMigration.ps1
@@ -93,17 +104,73 @@ The `Invoke-OpenDrsMigration.ps1` script supports different execution modes thro
 | `(none)` | ✅ Shows | ✅ Shows | ❌ N/A | ✅ Executes | ❌ No prompts |
 | `-WhatIf` | ✅ Shows | ✅ Shows | ❌ N/A | ❌ Simulated | ❌ No prompts |
 | `-Confirm` | ✅ Shows | ✅ Shows | ❌ N/A | ✅ Executes | ✅ **Prompts for each VM** |
-| `-ExportToCsv` | ✅ Shows | ✅ Shows | ✅ Executes | ✅ Executes | ❌ No prompts |
-| `-ExportToCsv -WhatIf` | ✅ Shows | ✅ Shows | ❌ Simulated | ❌ Simulated | ❌ No prompts |
-| `-ExportToCsv -Confirm` | ✅ Shows | ✅ Shows | ✅ Executes | ✅ Executes | ✅ **Prompts for CSV + each VM** |
-| `-ExportToCsv -Confirm -WhatIf` | ✅ Shows | ✅ Shows | ✅ Executes | ❌ Simulated | ✅ **Prompts for CSV only** |
+| `-ExportToCsv` | ✅ Shows | ✅ Shows | ✅ Executes* | ✅ Executes | ❌ No prompts |
+| `-ExportToCsv -WhatIf` | ✅ Shows | ✅ Shows | ✅ Executes* | ❌ Simulated | ❌ No prompts |
+| `-ExportToCsv -Confirm` | ✅ Shows | ✅ Shows | ✅ Executes* | ✅ Executes | ✅ **Prompts for each VM** |
+| `-ExportToCsv -Confirm -WhatIf` | ✅ Shows | ✅ Shows | ✅ Executes* | ❌ Simulated | ✅ **Prompts for each VM** |
+
+*CSV Export is handled by the analysis engine (`Get-OpenDrsRecommendation.ps1`)
 
 **Key Points:**
 - **Analysis and Recommendations** always display regardless of parameters
-- **CSV Export** only available when `-ExportToCsv` is specified
-- **`-WhatIf`** simulates VM migrations but does NOT affect CSV export behavior
-- **`-Confirm`** prompts separately for CSV export (if requested) and each VM migration
-- **`-ExportToCsv -Confirm -WhatIf`** creates CSV file with confirmation but only simulates VM migrations
+- **CSV Export** is handled by the analysis engine (`Get-OpenDrsRecommendation.ps1`) when `-ExportToCsv` is passed through
+- **`-WhatIf`** simulates VM migrations but does NOT affect CSV export behavior (CSV is still created)
+- **`-Confirm`** prompts separately for each VM migration (CSV export prompting is handled by the analysis engine)
+- **`-ExportToCsv -Confirm -WhatIf`** creates CSV file and only simulates VM migrations
+
+## 4.2. Maintenance Mode Evacuation
+
+The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that bypass all DRS rules and affinity groups.
+
+### Detection Method
+- **Hosts in Maintenance Mode**: `ConnectionState -eq 'Maintenance'`
+- **Hosts Entering Maintenance Mode**: Uses `Get-Task -Status Running` to find active "EnterMaintenanceMode" tasks
+
+### Evacuation Behavior
+- **Processing Order**: Evacuation recommendations are processed first
+- **Rule Bypassing**: All VM/Host affinity rules and groups are automatically bypassed for evacuations
+- **VM Support**: Handles both powered-on (vMotion) and powered-off (cold migration) VMs
+- **Load Balancing**: Distributes evacuated VMs across available hosts
+- **Combined Analysis**: Both evacuation and normal DRS recommendations are generated and included in the output
+
+### Examples
+```powershell
+# Check for maintenance mode evacuations
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Verbose
+
+# Execute evacuations with preview
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -WhatIf
+
+# Test maintenance mode detection
+.\Test-MaintenanceModeEvacuation.ps1 -vCenterServer "vcenter.domain.com"
+```
+
+### Output Format
+Evacuation recommendations include:
+- `Reason`: "Maintenance Evacuation"
+- Console output displays evacuation recommendations clearly in tables
+- Both evacuation and normal DRS recommendations are combined in the final output
+
+## 4.3. CSV Export and Recommendation Types
+
+When using `-ExportToCsv`, all recommendation types are exported to a single timestamped CSV file:
+
+### Recommendation Types in CSV:
+1. **Evacuation Recommendations**: `Reason` = "Maintenance Evacuation"
+2. **Standard DRS Recommendations**: `Reason` = "High CPU/Mem on source"  
+3. **Load Balancing Recommendations**: `Reason` = "Load Balancing"
+
+### CSV File Format:
+- **Filename**: `YYYYMMDD-HHMMSS-drs_recommendations.csv`
+- **Location**: Same directory as the script
+- **Contents**: All recommendation types combined in a single file
+- **Columns**: Cluster, VM_to_Move, Reason, Source_Host, Source_Host_CPU, Source_Host_Mem, Recommended_Destination_Host, Destination_Host_CPU, Destination_Host_Mem
+
+### Example:
+```powershell
+# Export all types of recommendations to CSV
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Balance -ExportToCsv
+```
 
 ---
 
@@ -143,10 +210,19 @@ The `-Quiet` parameter suppresses console output from the analysis engine while 
 ## 7. Technical Details
 
 ### 7.1. Algorithm
-The scripts use statistical analysis (standard deviation) to identify cluster imbalances:
+The scripts use multiple analysis methods to identify cluster imbalances:
+
+**Standard DRS Analysis:**
 - Calculate average CPU and memory utilization across cluster hosts
 - Identify hosts exceeding threshold based on standard deviation multiplier
 - Generate recommendations to move VMs from over-utilized to under-utilized hosts
+
+**Load Balancing Analysis (when `-Balance` is specified):**
+- Count VMs per host, excluding vCLS (vSphere Cluster Services) VMs
+- Calculate ideal distribution for even VM count across hosts
+- Generate recommendations to achieve balanced VM distribution regardless of resource utilization
+
+**Rule Compliance:**
 - Respect all VM/Host affinity rules and VM anti-affinity rules unless bypassed
 - Automatically exclude hosts in maintenance mode from all analysis and operations
 
@@ -170,38 +246,3 @@ The scripts use statistical analysis (standard deviation) to identify cluster im
 - **VMware vCenter Server 8.0.3.00500**
 - **VMware ESXi 8.0.3** (build 24674464)
 - **VMware ESXi 7.0.3** (build 24723872)
-
----
-
-## 4.2. Maintenance Mode Evacuation
-
-The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that bypass all DRS rules and affinity groups.
-
-### Detection Method
-- **Hosts in Maintenance Mode**: `ConnectionState -eq 'Maintenance'`
-- **Hosts Entering Maintenance Mode**: Uses `Get-Task -Status Running` to find active "EnterMaintenanceMode" tasks
-
-### Evacuation Behavior
-- **Processing Order**: Evacuation recommendations are processed first
-- **Rule Bypassing**: All VM/Host affinity rules and groups are automatically bypassed for evacuations
-- **VM Support**: Handles both powered-on (vMotion) and powered-off (cold migration) VMs
-- **Load Balancing**: Distributes evacuated VMs across available hosts
-- **Combined Analysis**: Both evacuation and normal DRS recommendations are generated and included in the output
-
-### Examples
-```powershell
-# Check for maintenance mode evacuations
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Verbose
-
-# Execute evacuations with preview
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -WhatIf
-
-# Test maintenance mode detection
-.\Test-MaintenanceModeEvacuation.ps1 -vCenterServer "vcenter.domain.com"
-```
-
-### Output Format
-Evacuation recommendations include:
-- `Reason`: "Maintenance Evacuation"
-- Console output displays evacuation recommendations clearly in tables
-- Both evacuation and normal DRS recommendations are combined in the final output

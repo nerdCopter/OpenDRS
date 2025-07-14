@@ -32,6 +32,10 @@
 .PARAMETER MigrationThreshold
     Sets the migration aggressiveness level (1-5) for the engine. Default is 3.
 
+.PARAMETER Balance
+    Enables load balancing recommendations to evenly distribute VMs across hosts,
+    even when hosts are not resource-constrained.
+
 .EXAMPLE
     .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com'
 
@@ -72,6 +76,8 @@ param(
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$MigrationThreshold = 3,
     [Parameter()]
+    [switch]$Balance,  # Enable load balancing recommendations
+    [Parameter()]
     [string]$CsvFile,  # Path to CSV file containing recommendations
     [Parameter()]
     [Alias('h', 'v', 'version')]
@@ -96,6 +102,7 @@ function Show-Usage {
     Write-Host "  -ExportToCsv                Export recommendations from the engine to a CSV file (only if recommendations exist)."
     Write-Host "  -BypassHostRulesAndGroups   Tell the engine to ignore VM/Host affinity rules."
     Write-Host "  -MigrationThreshold <1-5>   Set migration aggressiveness in the engine (1=conservative, 5=aggressive). Default is 3."
+    Write-Host "  -Balance                    Enable load balancing recommendations for even VM distribution across hosts."
     Write-Host "  -CsvFile <path>             Load recommendations from a CSV file instead of calling the analysis engine."
     Write-Host "  -Verbose                    Output detailed diagnostic information from the recommendation engine."
     Write-Host "  -WhatIf                     Show what would happen if the cmdlet runs. The cmdlet is not run."
@@ -187,6 +194,9 @@ if ($allRecommendations.Count -eq 0) {
     }
     if ($PSBoundParameters.ContainsKey('MigrationThreshold')) {
         $engineArgs['MigrationThreshold'] = $MigrationThreshold
+    }
+    if ($PSBoundParameters['Balance']) {
+        $engineArgs['Balance'] = $true
     }
     
     # Capture the recommendations from the engine script
