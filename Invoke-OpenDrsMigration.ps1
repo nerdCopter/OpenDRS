@@ -231,16 +231,45 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
         exit 1
     }
 
-    # The engine script will have disconnected, so we need to reconnect for migrations
-    try {
-        Write-Host "`nReconnecting to vCenter Server for migrations: $vCenterServer..."
-        Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
-        Write-Host "Successfully connected to $vCenterServer."
-        $shouldDisconnect = $true
+    # Check if we're already connected to the target vCenter
+    $existingConnection = $null
+    
+    # First check if we have a default connection that matches
+    if ($global:DefaultVIServer -and $global:DefaultVIServer.IsConnected) {
+        if ($global:DefaultVIServer.Name -eq $vCenterServer -or 
+            $global:DefaultVIServer.Name -like "*$vCenterServer*" -or 
+            $vCenterServer -like "*$($global:DefaultVIServer.Name)*") {
+            $existingConnection = $global:DefaultVIServer
+        }
     }
-    catch {
-        Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
-        exit 1
+    
+    # If not found in default, check all existing connections
+    if (-not $existingConnection) {
+        $existingConnection = Get-VIServer -ErrorAction SilentlyContinue | Where-Object { 
+            $_.IsConnected -and (
+                $_.Name -eq $vCenterServer -or 
+                $_.Name -like "*$vCenterServer*" -or 
+                $vCenterServer -like "*$($_.Name)*"
+            )
+        } | Select-Object -First 1
+    }
+    
+    if ($existingConnection -and $existingConnection.IsConnected) {
+        Write-Host "`nUsing existing connection to $($existingConnection.Name)."
+        $shouldDisconnect = $false
+    }
+    else {
+        # Need to connect to vCenter for migrations
+        try {
+            Write-Host "`nConnecting to vCenter Server for migrations: $vCenterServer..."
+            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
+            Write-Host "Successfully connected to $vCenterServer."
+            $shouldDisconnect = $true
+        }
+        catch {
+            Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
+            exit 1
+        }
     }
 }
 
