@@ -245,7 +245,12 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
     
     # If not found in default, check all existing connections
     if (-not $existingConnection) {
-        $existingConnection = Get-VIServer -ErrorAction SilentlyContinue | Where-Object { 
+        # Use $global:DefaultVIServers array to get all connections instead of Get-VIServer
+        $allConnections = @()
+        if ($global:DefaultVIServers) {
+            $allConnections = @($global:DefaultVIServers)
+        }
+        $existingConnection = $allConnections | Where-Object { 
             $_.IsConnected -and (
                 $_.Name -eq $vCenterServer -or 
                 $_.Name -like "*$vCenterServer*" -or 
@@ -261,10 +266,19 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
     else {
         # Need to connect to vCenter for migrations
         try {
-            Write-Host "`nConnecting to vCenter Server for migrations: $vCenterServer..."
-            Connect-VIServer -Server $vCenterServer -ErrorAction Stop | Out-Null
-            Write-Host "Successfully connected to $vCenterServer."
-            $shouldDisconnect = $true
+            Write-Host "`nConnecting to vCenter Server for migrations: '$vCenterServer'..."
+            
+            # Use hashtable splatting for reliable parameter binding across all PowerShell versions
+            $connectParams = @{
+                Server = $vCenterServer
+                ErrorAction = 'Stop'
+            }
+            $connection = Connect-VIServer @connectParams
+            
+            if ($connection) {
+                Write-Host "Successfully connected to $($connection.Name)."
+                $shouldDisconnect = $true
+            }
         }
         catch {
             Write-Error "Failed to connect to vCenter Server '$vCenterServer'. Please check the server name and your network connection. `n$($_.Exception.Message)"
