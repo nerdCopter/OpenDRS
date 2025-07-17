@@ -14,6 +14,17 @@ The project consists of a modular, two-part system to separate analysis from exe
 *   **`Get-OpenDrsRecommendation.ps1`**: A read-only "engine" that analyzes cluster health and generates migration recommendations.
 *   **`Invoke-OpenDrsMigration.ps1`**: An "executor" that consumes recommendations from the analysis engine and performs the actual VM migrations.
 
+### 2.1. Important: Not a Direct VMware DRS Replacement
+
+**This toolset is NOT a 1:1 equivalent of VMware's integrated DRS or PowerCLI's `Get-DrsRecommendation`/`Invoke-DrsRecommendation` cmdlets.** Key differences include:
+
+*   **Real-time Analysis Only**: Uses current host utilization (`QuickStats`) rather than historical data or saved statistics that VMware DRS leverages for trend analysis.
+*   **Custom Algorithm**: Implements independent load balancing logic based on standard deviation analysis, not VMware's proprietary DRS algorithms.
+*   **VM Count-Based Balancing**: The `-Balance` parameter distributes VMs based on quantity (count) across hosts, prioritizing migration of smallest VMs first, rather than resource-weighted distribution.
+*   **Potential Conflicts**: Since this operates independently of VMware DRS, recommendations may occasionally conflict with or counteract VMware's native DRS decisions, especially when both systems are active simultaneously.
+
+### 2.2. Connection Management and Maintenance Mode Detection
+
 Both scripts feature intelligent connection management - they detect existing vCenter connections and only connect/disconnect when necessary. This enables efficient chaining and variable assignment workflows.
 
 The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that take priority over normal DRS analysis. Maintenance mode evacuations bypass all rules and ensure rapid VM evacuation.
@@ -262,8 +273,16 @@ The `-Quiet` parameter suppresses console output from the analysis engine while 
 
 ## 7. Technical Details
 
-### 7.1. Algorithm
-The scripts use multiple analysis methods to identify cluster imbalances:
+### 7.1. Algorithm Implementation
+
+**Important**: These scripts implement a custom DRS-like algorithm that is **not equivalent** to VMware's native DRS engine. Key technical differences:
+
+**Data Source:**
+- Uses real-time vSphere `QuickStats` data (current CPU/memory utilization)
+- Does NOT use historical performance data or saved statistics that VMware DRS leverages
+- No trend analysis or predictive modeling capabilities
+
+**Analysis Methods:**
 
 **Cluster Filtering:**
 - Analyze all clusters when no `-Clusters` parameter is specified (default behavior)
@@ -271,18 +290,26 @@ The scripts use multiple analysis methods to identify cluster imbalances:
 - Supports exact cluster name matching for precise targeting
 
 **Standard DRS Analysis:**
-- Calculate average CPU and memory utilization across cluster hosts
-- Identify hosts exceeding threshold based on standard deviation multiplier
+- Calculate average CPU and memory utilization across cluster hosts using standard deviation analysis
+- Identify hosts exceeding threshold based on standard deviation multiplier (configurable via `-MigrationThreshold`)
 - Generate recommendations to move VMs from over-utilized to under-utilized hosts
+- Moves largest VMs first during standard DRS analysis
 
 **Load Balancing Analysis (when `-Balance` is specified):**
 - Count VMs per host, excluding vCLS (vSphere Cluster Services) VMs
-- Calculate ideal distribution for even VM count across hosts
+- Calculate ideal distribution for even VM **count** (not resource-weighted) across hosts
 - Generate recommendations to achieve balanced VM distribution regardless of resource utilization
+- **Moves smallest VMs first** to optimize distribution efficiency
+- May conflict with resource-based recommendations from VMware's native DRS
 
 **Rule Compliance:**
 - Respect all VM/Host affinity rules and VM anti-affinity rules unless bypassed
 - Automatically exclude hosts in maintenance mode from all analysis and operations
+
+**Coexistence Considerations:**
+- When VMware DRS is enabled and set to automatic mode, recommendations from this toolset may occasionally conflict with VMware's native DRS decisions
+- Both systems operate independently and may attempt to optimize for different criteria simultaneously
+- Consider VMware DRS automation level and cluster configuration when using this toolset
 
 ### 7.2. Rule Compliance
 - **VM/Host Affinity Rules**: VMs required to run on specific host groups are only migrated within those groups
