@@ -12,9 +12,9 @@ This project provides a set of PowerShell scripts for analyzing and executing VM
 The project consists of a modular, two-part system to separate analysis from execution:
 
 *   **`Get-OpenDrsRecommendation.ps1`**: A read-only "engine" that analyzes cluster health and generates migration recommendations.
-*   **`Invoke-OpenDrsMigration.ps1`**: An "executor" that consumes recommendations from the engine and performs the actual VM migrations.
+*   **`Invoke-OpenDrsMigration.ps1`**: An "executor" that consumes recommendations from the analysis engine and performs the actual VM migrations.
 
-Both scripts feature intelligent connection management - they detect existing vCenter connections and only connect/disconnect when necessary. This enables efficient chaining and pipeline usage.
+Both scripts feature intelligent connection management - they detect existing vCenter connections and only connect/disconnect when necessary. This enables efficient chaining and variable assignment workflows.
 
 The scripts automatically detect hosts in maintenance mode or entering maintenance mode and generate evacuation recommendations that take priority over normal DRS analysis. Maintenance mode evacuations bypass all rules and ensure rapid VM evacuation.
 
@@ -30,11 +30,12 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
     Connects to vCenter, analyzes cluster health using standard deviation analysis, and generates migration recommendations while respecting VM/Host rules. Automatically detects maintenance mode hosts and generates evacuation recommendations.
 *   **Parameters:**
     *   `-vCenterServer` (string, Required): FQDN or IP address of the vCenter Server.
+    *   `-Clusters` (string[], Optional): Specify one or more cluster names to analyze. If not provided, all clusters are analyzed.
     *   `-MigrationThreshold` (integer, 1–5): Controls the aggressiveness of recommendations (1=conservative, 5=aggressive). Defaults to 3.
     *   `-Balance` (switch): Generates load balancing recommendations to evenly distribute VMs across hosts, even when hosts are not resource-constrained. Useful for clusters with uneven VM distribution. Excludes vCLS (vSphere Cluster Services) VMs from balancing calculations.
     *   `-BypassHostRulesAndGroups` (switch): If set, recommendations will ignore all VM/Host affinity and anti-affinity rules.
     *   `-ExportToCsv` (switch): Exports recommendations to a timestamped CSV file when recommendations exist.
-    *   `-Quiet` (switch): Suppresses console output for pipeline scenarios.
+    *   `-Quiet` (switch): Suppresses console output for variable assignment workflows.
     *   `-NoDisconnect` (switch): Internal parameter to prevent disconnecting from vCenter when called by other scripts.
 *   **Output:**  
     Returns an array of `PSCustomObject`s representing migration recommendations. Displays complete cluster analysis including host utilization, cluster balance statistics, and recommendation tables.
@@ -42,20 +43,21 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 ### 3.2. Invoke-OpenDrsMigration.ps1 (The Executor)
 
 *   **Role:**  
-    Executes the VM migrations recommended by the engine. This is the only script that performs **write operations**. Supports pipeline input for direct consumption of recommendations.
+    Executes the VM migrations recommended by the analysis engine. This is the only script that performs **write operations**. Supports variable assignment for direct consumption of recommendations.
 *   **Behavior:**  
-    1.  If used standalone, calls `Get-OpenDrsRecommendation.ps1` internally.
-    2.  If used in pipeline, accepts recommendation objects directly from `Get-OpenDrsRecommendation.ps1`.
+    1.  If used independently, calls `Get-OpenDrsRecommendation.ps1` internally.
+    2.  If used with variable assignment, accepts recommendation objects directly from `Get-OpenDrsRecommendation.ps1`.
     3.  If CSV file is provided, loads recommendations from file instead of calling the analysis engine.
     4.  Executes `Move-VM` operations with high vMotion priority for each recommendation.
     5.  Logs the success or failure of each migration attempt.
 *   **Parameters:**
-    *   `-vCenterServer` (string): FQDN or IP address of the vCenter Server (required for standalone use, optional for pipeline).
+    *   `-vCenterServer` (string): FQDN or IP address of the vCenter Server (required for independent use, optional for variable assignment workflows).
+    *   `-Clusters` (string[], Optional): Specify one or more cluster names to analyze. Passthrough parameter for the analysis engine.
     *   `-CsvFile` (string): Path to a CSV file containing migration recommendations. When provided, the script loads recommendations from this file instead of calling the analysis engine.
-    *   `-ExportToCsv` (switch): Passthrough parameter for the analysis engine (standalone mode only).
-    *   `-Balance` (switch): Passthrough parameter for the analysis engine (standalone mode only).
-    *   `-BypassHostRulesAndGroups` (switch): Passthrough parameter for the analysis engine (standalone mode only).
-    *   `-MigrationThreshold` (integer, 1–5): Passthrough parameter for the analysis engine (standalone mode only).
+    *   `-ExportToCsv` (switch): Passthrough parameter for the analysis engine.
+    *   `-Balance` (switch): Passthrough parameter for the analysis engine.
+    *   `-BypassHostRulesAndGroups` (switch): Passthrough parameter for the analysis engine.
+    *   `-MigrationThreshold` (integer, 1–5): Passthrough parameter for the analysis engine.
     *   `-WhatIf`, `-Confirm`: Natively supported via `CmdletBinding` to allow users to preview actions before execution.
 *   **Output:**  
     Displays migration execution status and results for each recommendation processed.
@@ -64,39 +66,50 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 
 ## 4. Usage Examples
 
-### Analyze clusters without making changes:
+### Analyze all clusters without making changes:
 ```powershell
 .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com"
 ```
 
-### Execute migrations with confirmation:
+### Analyze specific cluster only:
 ```powershell
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com"
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster"
 ```
 
-### Preview migrations without executing:
+### Analyze multiple specific clusters:
 ```powershell
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -WhatIf
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster","Backup Cluster"
 ```
 
-### Aggressive analysis with CSV export:
+### Execute migrations for specific cluster with confirmation:
 ```powershell
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -MigrationThreshold 5 -ExportToCsv
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster"
 ```
 
-### Load balancing for even VM distribution:
+### Preview migrations for specific clusters without executing:
 ```powershell
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Balance
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Cluster1","Cluster2" -WhatIf
 ```
 
-### Execute load balancing migrations:
+### Aggressive analysis of specific cluster with CSV export:
 ```powershell
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Balance
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -MigrationThreshold 5 -ExportToCsv
 ```
 
-### Pipeline usage for efficient processing:
+### Load balancing for specific cluster:
 ```powershell
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Quiet | .\Invoke-OpenDrsMigration.ps1
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -Balance
+```
+
+### Execute load balancing migrations for specific cluster:
+```powershell
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -Balance
+```
+
+### Variable assignment workflow for efficient processing of specific clusters:
+```powershell
+$recommendations = .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -Quiet -NoDisconnect
+if ($recommendations) { .\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" }
 ```
 
 ### Execute migrations from CSV file:
@@ -107,6 +120,16 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 ### Preview migrations from CSV file:
 ```powershell
 .\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -CsvFile "recommendations.csv" -WhatIf
+```
+
+### Advanced cluster-specific workflows:
+```powershell
+# Generate recommendations for production clusters only, then execute with confirmation
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Prod-Cluster-01","Prod-Cluster-02" -MigrationThreshold 4 -ExportToCsv
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Prod-Cluster-01","Prod-Cluster-02" -Confirm
+
+# Targeted load balancing for specific cluster with aggressive threshold
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Backup Cluster" -Balance -MigrationThreshold 5 -WhatIf
 ```
 
 ## 4.1. Invoke-OpenDrsMigration.ps1 Parameter Behavior
@@ -149,14 +172,11 @@ The scripts automatically detect hosts in maintenance mode or entering maintenan
 
 ### Examples
 ```powershell
-# Check for maintenance mode evacuations
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Verbose
+# Check for maintenance mode evacuations in specific cluster
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -Verbose
 
-# Execute evacuations with preview
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -WhatIf
-
-# Test maintenance mode detection
-.\Test-MaintenanceModeEvacuation.ps1 -vCenterServer "vcenter.domain.com"
+# Execute evacuations with preview for specific cluster
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -WhatIf
 ```
 
 ### Output Format
@@ -182,31 +202,50 @@ When using `-ExportToCsv`, all recommendation types are exported to a single tim
 
 ### Example:
 ```powershell
-# Export all types of recommendations to CSV
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Balance -ExportToCsv
+# Export all types of recommendations to CSV for specific cluster
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter.domain.com" -Clusters "Production Cluster" -Balance -ExportToCsv
 ```
 
 ---
 
 ## 5. Advanced Features
 
-### 5.1. Smart Connection Management
+### 5.1. Cluster Filtering
+Both scripts support targeted analysis by specifying specific clusters:
+
+- **Default Behavior**: Analyze all clusters when no `-Clusters` parameter is specified
+- **Single Cluster**: `-Clusters "Production Cluster"` to analyze only one cluster
+- **Multiple Clusters**: `-Clusters "Cluster1","Cluster2"` to analyze specific clusters
+- **Exact Matching**: Cluster names must match exactly (case-sensitive)
+- **Error Handling**: Clear error messages when specified clusters are not found
+
+**Benefits:**
+- **Focused Analysis**: Target specific clusters without analyzing entire infrastructure
+- **Reduced Scope**: Faster execution when working with large vCenter environments
+- **Operational Safety**: Limit operations to specific clusters for controlled changes
+- **Resource Efficiency**: Minimize vCenter API calls and processing time
+
+### 5.2. Smart Connection Management
 Both scripts intelligently manage vCenter connections:
 - **Reuse existing connections** when already connected to the target server
 - **Only connect when necessary**, avoiding unnecessary disconnection/reconnection cycles  
 - **Independent operation** - each script manages its own connection lifecycle
 - **Clear status messages** indicating connection decisions
 
-### 5.2. Pipeline Support
+### 5.3. Variable Assignment Support
 The scripts support efficient chaining using PowerShell variable assignment:
 ```powershell
-# Efficient chaining with quiet analysis output
+# Efficient chaining with quiet analysis output for all clusters
 $recommendations = .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter" -Quiet -NoDisconnect
 if ($recommendations) { .\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter" }
 
+# Efficient chaining for specific clusters
+$recommendations = .\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter" -Clusters "Production Cluster" -Quiet -NoDisconnect
+if ($recommendations) { .\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter" }
+
 # Traditional separate execution (shows full analysis output)
-.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter"
-.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter"
+.\Get-OpenDrsRecommendation.ps1 -vCenterServer "vcenter" -Clusters "Production Cluster"
+.\Invoke-OpenDrsMigration.ps1 -vCenterServer "vcenter" -Clusters "Production Cluster"
 ```
 
 The `-Quiet` parameter suppresses console output from the analysis engine while preserving all returned recommendation objects. Both scripts share vCenter connections efficiently, avoiding unnecessary reconnections.
@@ -225,6 +264,11 @@ The `-Quiet` parameter suppresses console output from the analysis engine while 
 
 ### 7.1. Algorithm
 The scripts use multiple analysis methods to identify cluster imbalances:
+
+**Cluster Filtering:**
+- Analyze all clusters when no `-Clusters` parameter is specified (default behavior)
+- Analyze only specified clusters when `-Clusters` parameter is provided with one or more cluster names
+- Supports exact cluster name matching for precise targeting
 
 **Standard DRS Analysis:**
 - Calculate average CPU and memory utilization across cluster hosts

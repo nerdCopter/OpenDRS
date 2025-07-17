@@ -30,11 +30,15 @@
     load recommendations from this file instead of calling the analysis engine.
 
 .PARAMETER MigrationThreshold
-    Sets the migration aggressiveness level (1-5) for the engine. Default is 3.
+    Sets the migration aggressiveness level (1-5) for the analysis engine. Default is 3.
 
 .PARAMETER Balance
     Enables load balancing recommendations to evenly distribute VMs across hosts,
     even when hosts are not resource-constrained.
+
+.PARAMETER Clusters
+    If specified, limits analysis to the specified cluster(s). Supports cluster names with spaces.
+    Can accept a single cluster name or an array of cluster names.
 
 .EXAMPLE
     .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com'
@@ -58,6 +62,11 @@
 
     Loads migration recommendations from a CSV file and executes them.
 
+.EXAMPLE
+    .\Invoke-OpenDrsMigration.ps1 -vCenterServer 'vcenter.yourdomain.com' -Clusters 'Production R650 Cluster','Veeam Backup FC630 Cluster' -WhatIf
+
+    Analyzes only the specified clusters and shows what migrations would be performed.
+
 .NOTES
     Version:        1.0.0
     Creation Date:  July 2025
@@ -79,6 +88,8 @@ param(
     [Parameter()]
     [string]$CsvFile,  # Path to CSV file containing recommendations
     [Parameter()]
+    [string[]]$Clusters,  # Optional cluster name(s) to analyze
+    [Parameter()]
     [Alias('h', 'v', 'version')]
     [switch]$help
 )
@@ -98,12 +109,13 @@ function Show-Usage {
     Write-Host ""
     Write-Host "Parameters:"
     Write-Host "  -vCenterServer <string>     (Required) The FQDN or IP address of the vCenter Server."
-    Write-Host "  -ExportToCsv                Export recommendations from the engine to a CSV file (only if recommendations exist)."
-    Write-Host "  -BypassHostRulesAndGroups   Tell the engine to ignore VM/Host affinity rules."
-    Write-Host "  -MigrationThreshold <1-5>   Set migration aggressiveness in the engine (1=conservative, 5=aggressive). Default is 3."
+    Write-Host "  -Clusters <string[]>        Optional cluster name(s) to analyze. Supports names with spaces."
+    Write-Host "  -ExportToCsv                Export recommendations from the analysis engine to a CSV file (only if recommendations exist)."
+    Write-Host "  -BypassHostRulesAndGroups   Tell the analysis engine to ignore VM/Host affinity rules."
+    Write-Host "  -MigrationThreshold <1-5>   Set migration aggressiveness in the analysis engine (1=conservative, 5=aggressive). Default is 3."
     Write-Host "  -Balance                    Enable load balancing recommendations for even VM distribution across hosts."
     Write-Host "  -CsvFile <path>             Load recommendations from a CSV file instead of calling the analysis engine."
-    Write-Host "  -Verbose                    Output detailed diagnostic information from the recommendation engine."
+    Write-Host "  -Verbose                    Output detailed diagnostic information from the analysis engine."
     Write-Host "  -WhatIf                     Show what would happen if the cmdlet runs. The cmdlet is not run."
     Write-Host "  -Confirm                    Prompts you for confirmation before running the cmdlet."
     Write-Host "  -help, -h, -version, -v     Show this help message."
@@ -171,7 +183,7 @@ if (-not (Get-Command Connect-VIServer -ErrorAction SilentlyContinue)) {
     }
 }
 
-# If no recommendations found yet, get them from the engine script
+# If no recommendations found yet, get them from the analysis engine script
 if ($allRecommendations.Count -eq 0) {
     if ([string]::IsNullOrEmpty($vCenterServer)) {
         Write-Error "vCenterServer parameter is required to get recommendations from the analysis engine."
@@ -197,11 +209,14 @@ if ($allRecommendations.Count -eq 0) {
     if ($PSBoundParameters['Balance']) {
         $engineArgs['Balance'] = $true
     }
+    if ($PSBoundParameters['Clusters']) {
+        $engineArgs['Clusters'] = $Clusters
+    }
     
-    # Capture the recommendations from the engine script
+    # Capture the recommendations from the analysis engine script
     $allRecommendations = @(& "$PSScriptRoot\Get-OpenDrsRecommendation.ps1" @engineArgs)
     
-    # Debug: Show what we received from the engine
+    # Debug: Show what we received from the analysis engine
     Write-Host "`nReceived $($allRecommendations.Count) recommendations from engine."
     if ($allRecommendations.Count -gt 0) {
         # Separate evacuation from normal recommendations
