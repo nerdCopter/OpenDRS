@@ -324,11 +324,11 @@ if ($allRecommendations -and $allRecommendations.Count -gt 0) {
                 
                 # Handle both powered-on and powered-off VMs
                 if ($vmToMove.PowerState -eq 'PoweredOn') {
-                    # Use vMotion for powered-on VMs
-                    Move-VM -VM $vmToMove -Destination $destinationHost -VMotionPriority High -ErrorAction Stop
+                    # Use vMotion for powered-on VMs (note: VMotionPriority parameter doesn't exist in modern PowerCLI)
+                    Move-VM -VM $vmToMove -Destination $destinationHost -ErrorAction Stop
                     Write-Host "✓ ${evacuationPrefix}Successfully migrated VM '$($rec.VM_to_Move)' (vMotion)" -ForegroundColor Green
                 } elseif ($vmToMove.PowerState -eq 'PoweredOff') {
-                    # Use storage migration for powered-off VMs
+                    # Use cold migration for powered-off VMs
                     Move-VM -VM $vmToMove -Destination $destinationHost -ErrorAction Stop
                     Write-Host "✓ ${evacuationPrefix}Successfully migrated VM '$($rec.VM_to_Move)' (cold migration)" -ForegroundColor Green
                 } else {

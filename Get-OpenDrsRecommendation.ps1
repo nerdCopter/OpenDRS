@@ -200,14 +200,22 @@ foreach ($cluster in $clusters) {
     }
     
     # Also check for hosts currently entering maintenance mode (active tasks)
-    $hostsEnteringMaintenance = foreach ($esxiHost in $allHostsInCluster) {
-        $maintenanceTasks = Get-Task -Status Running | Where-Object { 
-            $_.ObjectId -eq $esxiHost.Id -and 
-            $_.Name -like "*EnterMaintenanceMode*"
+    # Note: Get-Task has limited support on Linux/PowerShell Core
+    $hostsEnteringMaintenance = @()
+    try {
+        $hostsEnteringMaintenance = foreach ($esxiHost in $allHostsInCluster) {
+            $maintenanceTasks = Get-Task -Status Running -ErrorAction Stop | Where-Object { 
+                $_.ObjectId -eq $esxiHost.Id -and 
+                $_.Name -like "*EnterMaintenanceMode*"
+            }
+            if ($maintenanceTasks) {
+                $esxiHost
+            }
         }
-        if ($maintenanceTasks) {
-            $esxiHost
-        }
+    }
+    catch {
+        # Get-Task not available (e.g., on Linux) - skip task-based detection
+        Write-Verbose "Get-Task cmdlet not available or failed: $($_.Exception.Message)"
     }
     
     # Combine both sets
